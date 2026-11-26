@@ -56,7 +56,7 @@ export interface PakImageRef {
 
 export interface PakAnimationRef {
   speed: number;
-  loop: number;
+  /** The order frames are played in, as indices into `frames` (animation(speed, ...sequence)). */
   sequence?: number[];
   frames: PakImageRef[];
 }
@@ -81,6 +81,11 @@ export interface PakObjectState {
   collisionMask?: string[];
   selectionType?: 'pixel' | 'box' | 'none';
   rules: string[];
+  /**
+   * The state's lines exactly as read from the .pak file, including blank and comment lines just
+   * before it. Saving rewrites only the directives that changed; states without one are generated.
+   */
+  source?: string[];
 }
 
 export interface PakObject {
@@ -100,6 +105,8 @@ export interface PakRoom {
   x: number;
   y: number;
   subroom?: boolean;
+  /** Header flags other than `subroom` (e.g. `lock-player-zoom-75`), kept so a rewritten header doesn't drop them. */
+  otherFlags?: string[];
   rules: string[];
   filePath: string;
   startLine: number;

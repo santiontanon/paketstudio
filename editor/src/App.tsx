@@ -36,6 +36,14 @@ import {
 } from './utils/palettes';
 import { normalizePath, isSamePath } from './utils/paths';
 import {
+  copiesAfterSavingAll,
+  copiesAfterTextSave,
+  isSameProjectFile,
+  latestPakContent,
+  viewTypeForFileName,
+  type PakCopies
+} from './utils/workspaceFiles';
+import {
   DEFAULT_PLATFORM,
   DEFAULT_LANGUAGE,
   DEFAULT_MAIN_PAK,
@@ -116,7 +124,7 @@ export const App: React.FC = () => {
   const [projectItems, setProjectItems] = useState<PakItem[]>([]);
   const [projectObjects, setProjectObjects] = useState<PakObject[]>([]);
   const [projectRooms, setProjectRooms] = useState<PakRoom[]>([]);
-  const [inMemoryPakFiles, setInMemoryPakFiles] = useState<Record<string, { content: string; isDirty: boolean }>>({});
+  const [inMemoryPakFiles, setInMemoryPakFiles] = useState<PakCopies>({});
 
   const [consoleOutput, setConsoleOutput] = useState<string>('');
   const [problems, setProblems] = useState<CompilerProblem[]>([]);
@@ -493,7 +501,9 @@ export const App: React.FC = () => {
         filePath,
         title: fileName,
         content,
-        isDirty: false
+        isDirty: false,
+        // Without a view type, a new PNG would open in the pixel editor but be saved as text.
+        viewType: viewTypeForFileName(fileName)
       };
 
       setTabs(prev => {
@@ -660,7 +670,13 @@ export const App: React.FC = () => {
       // Binary / image files
       const ext = file.extension.toLowerCase();
       let content = '';
-      if (!BINARY_EXTENSIONS.has(ext)) {
+      let isDirty = false;
+      // A .pak the panels have edited but not saved opens with those edits, so the tab stays the newest copy.
+      const panelCopy = ext === 'pak' ? inMemoryPakFiles[file.relative_path] : undefined;
+      if (panelCopy?.isDirty) {
+        content = panelCopy.content;
+        isDirty = true;
+      } else if (!BINARY_EXTENSIONS.has(ext)) {
         content = await invoke<string>('read_text_file', { filePath: file.path });
       }
 
@@ -669,8 +685,8 @@ export const App: React.FC = () => {
         filePath: file.path,
         title: file.name,
         content,
-        isDirty: false,
-        viewType: BINARY_EXTENSIONS.has(ext) ? 'image' : 'code'
+        isDirty,
+        viewType: viewTypeForFileName(file.name)
       };
 
       setTabs(prev => [...prev, newTab]);
@@ -813,14 +829,11 @@ export const App: React.FC = () => {
     }
   };
 
-  // Read current in-memory content of a .pak file
+  // Read the newest text of a .pak file: its open tab, else the panels' copy, else the file on disk
   const getPakContentInMemory = useCallback(async (relPath: string): Promise<string> => {
-    if (inMemoryPakFiles[relPath]) {
-      return inMemoryPakFiles[relPath].content;
-    }
-    const openTab = tabs.find(t => t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`));
-    if (openTab) {
-      return openTab.content;
+    const inEditor = latestPakContent(relPath, inMemoryPakFiles, tabs);
+    if (inEditor !== undefined) {
+      return inEditor;
     }
     if (!projectPath) return '';
     const fullPath = relPath.startsWith('/') ? relPath : `${projectPath}/${relPath}`;
@@ -838,7 +851,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:items') {
@@ -865,7 +878,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:items') {
@@ -892,7 +905,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:items') {
@@ -919,7 +932,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:objects') {
@@ -946,7 +959,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:objects') {
@@ -973,7 +986,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:objects') {
@@ -1000,7 +1013,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:rooms') {
@@ -1027,7 +1040,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:rooms') {
@@ -1064,7 +1077,7 @@ export const App: React.FC = () => {
     }));
 
     setTabs(prev => prev.map(t => {
-      if (t.filePath.endsWith(relPath) || t.filePath.endsWith(`/${relPath}`)) {
+      if (isSameProjectFile(t.filePath, relPath)) {
         return { ...t, content: newContent, isDirty: true };
       }
       if (t.id === 'special:rooms') {
@@ -1084,6 +1097,7 @@ export const App: React.FC = () => {
   const handleSaveAllDirtyFiles = useCallback(async () => {
     if (!projectPath) return;
 
+    const unsavedCopies: string[] = [];
     for (const [relPath, fileData] of Object.entries(inMemoryPakFiles)) {
       if (fileData.isDirty) {
         const fullPath = relPath.startsWith('/') ? relPath : `${projectPath}/${relPath}`;
@@ -1092,10 +1106,12 @@ export const App: React.FC = () => {
           setConsoleOutput(prev => prev + `Saved: ${relPath}\n`);
         } catch (err) {
           console.error(`Failed to save ${relPath}:`, err);
+          unsavedCopies.push(relPath);
         }
       }
     }
 
+    const savedTextTabs: Array<{ filePath: string; content: string }> = [];
     for (const tab of tabs) {
       if (tab.isDirty && !tab.filePath.startsWith('special:')) {
         try {
@@ -1103,6 +1119,7 @@ export const App: React.FC = () => {
             await invoke('write_file_base64', { filePath: tab.filePath, base64Data: tab.content });
           } else {
             await invoke('write_text_file', { filePath: tab.filePath, content: tab.content });
+            savedTextTabs.push({ filePath: tab.filePath, content: tab.content });
           }
           setConsoleOutput(prev => prev + `Saved: ${tab.title}\n`);
         } catch (err) {
@@ -1111,13 +1128,9 @@ export const App: React.FC = () => {
       }
     }
 
-    setInMemoryPakFiles(prev => {
-      const next: Record<string, { content: string; isDirty: boolean }> = {};
-      for (const [k, v] of Object.entries(prev)) {
-        next[k] = { ...v, isDirty: false };
-      }
-      return next;
-    });
+    // A tab saved after the panels' copy of the same file holds newer text: the copy takes that
+    // text, so a later panel edit doesn't start from (and save) older text.
+    setInMemoryPakFiles(prev => copiesAfterSavingAll(prev, savedTextTabs, unsavedCopies));
 
     setTabs(prev => prev.map(t => ({ ...t, isDirty: false })));
   }, [projectPath, inMemoryPakFiles, tabs]);
@@ -1170,8 +1183,10 @@ export const App: React.FC = () => {
       setTabs(prev => prev.map(t => (t.id === current.id ? { ...t, isDirty: false } : t)));
       setConsoleOutput(prev => prev + `Saved: ${current.title}\n`);
 
-      // If a .pak file was saved in Monaco, reload the visual inspectors
+      // If a .pak file was saved in Monaco, the panels' copy of it is now older than the file:
+      // replace it with the saved text so the next panel edit starts from it, and reload the inspectors.
       if (current.filePath.toLowerCase().endsWith('.pak')) {
+        setInMemoryPakFiles(prev => copiesAfterTextSave(prev, current.filePath, current.content));
         reloadProjectInspectors(files);
       }
     } catch (err) {

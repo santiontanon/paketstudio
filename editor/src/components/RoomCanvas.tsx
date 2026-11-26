@@ -32,6 +32,7 @@ import {
   isObjectIdTaken
 } from '../utils/tmxParser';
 import { parentDir, isAbsolutePath } from '../utils/paths';
+import { statePreviewImage } from '../utils/pakParser';
 import { COMMON_DIRECTIONS, PLAYER_OBJECT_ID } from '../constants';
 import { AddTilesetModal } from './AddTilesetModal';
 
@@ -211,8 +212,9 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
     const spriteFiles = new Set<string>();
     for (const obj of projectObjects) {
       for (const st of obj.states) {
-        if (st.image?.file) {
-          spriteFiles.add(st.image.file);
+        const sprite = statePreviewImage(st);
+        if (sprite?.file) {
+          spriteFiles.add(sprite.file);
         }
       }
     }
@@ -663,10 +665,11 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
           || def?.states[0];
 
         let drawnSprite = false;
-        if (stateObj?.image?.file) {
-          const img = spriteImages.get(stateObj.image.file);
+        const sprite = statePreviewImage(stateObj);
+        if (sprite?.file) {
+          const img = spriteImages.get(sprite.file);
           if (img) {
-            const { x1, y1, x2 = x1 + objW, y2 = y1 + objH } = stateObj.image;
+            const { x1, y1, x2 = x1 + objW, y2 = y1 + objH } = sprite;
             const sw = Math.max(1, x2 - x1);
             const sh = Math.max(1, y2 - y1);
 
@@ -1086,9 +1089,10 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
     let w = 16;
     let h = 16;
     const defaultState = objDef.states[0];
-    if (defaultState?.image?.x2 !== undefined && defaultState?.image?.y2 !== undefined) {
-      w = defaultState.image.x2 - defaultState.image.x1;
-      h = defaultState.image.y2 - defaultState.image.y1;
+    const defaultSprite = statePreviewImage(defaultState);
+    if (defaultSprite?.x2 !== undefined && defaultSprite?.y2 !== undefined) {
+      w = defaultSprite.x2 - defaultSprite.x1;
+      h = defaultSprite.y2 - defaultSprite.y1;
     }
 
     // Place near center of room

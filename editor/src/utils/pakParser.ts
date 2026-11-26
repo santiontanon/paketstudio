@@ -72,6 +72,54 @@ function getIndentation(line: string): number {
 }
 
 /**
+ * Indents block body lines that have no indentation of their own. Lines that are already
+ * indented (with spaces or tabs) and blank lines are written exactly as given.
+ */
+function indentBodyLines(bodyLines: string[], indent: string): string[] {
+  return bodyLines.map(line => (line.trim() === '' || /^\s/.test(line) ? line : `${indent}${line}`));
+}
+
+/**
+ * Compares two block bodies the way an editor round-trip would see them:
+ * trailing whitespace on each line and trailing blank lines don't count as a change.
+ */
+function sameBodyLines(a: string[], b: string[]): boolean {
+  const normalize = (bodyLines: string[]) => bodyLines.map(line => line.trimEnd()).join('\n').trimEnd();
+  return normalize(a) === normalize(b);
+}
+
+/**
+ * Structural equality for parsed .pak values. A missing property and an `undefined` one are equal.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => sameValue(v, b[i]));
+  }
+  if (a && b && typeof a === 'object' && typeof b === 'object') {
+    const ra = a as Record<string, unknown>;
+    const rb = b as Record<string, unknown>;
+    const keys = new Set([...Object.keys(ra), ...Object.keys(rb)]);
+    return [...keys].every(k => sameValue(ra[k], rb[k]));
+  }
+  return false;
+}
+
+/** The parts of an object that are written to the file (not where it was read from). */
+function objectContent(obj: PakObject) {
+  const { filePath: _filePath, startLine: _startLine, endLine: _endLine, ...content } = obj;
+  return content;
+}
+
+/**
+ * The sprite to show for a state in previews: its image, or the first frame of its animation.
+ * (An animated state has no `image`; its frames are only in `animation`.)
+ */
+export function statePreviewImage(state: PakObjectState | undefined): PakImageRef | undefined {
+  return state?.image ?? state?.animation?.frames[0];
+}
+
+/**
  * Parses image("path.png") or image("path.png", x1, y1, x2, y2)
  */
 export function parseImageDirective(line: string): PakImageRef | undefined {
@@ -95,6 +143,314 @@ export function parseImageDirective(line: string): PakImageRef | undefined {
   return { file, x1: 0, y1: 0 };
 }
 
+/** An inclusive range of line indices. */
+interface LineSpan {
+  start: number;
+  end: number;
+}
+
+/** Where, within a state's source lines, each directive the Objects panel edits was written. */
+interface StateLayout {
+  header: LineSpan;
+  /** image(...), empty-image(...), or animation(...) together with its frames. */
+  sprite?: LineSpan;
+  collisionMask?: LineSpan;
+  selection?: LineSpan;
+}
+
+function isBlankOrComment(line: string): boolean {
+  const t = line.trim();
+  return !t || t.startsWith('#') || t.startsWith(';');
+}
+
+/**
+ * The last line of the top-level block whose header is at `headerLine`: the last non-blank line
+ * of the indented lines that follow it. Blank lines after the block aren't part of it.
+ */
+function lastBlockLine(lines: string[], headerLine: number): number {
+  let last = headerLine;
+  for (let i = headerLine + 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    if (getIndentation(lines[i]) === 0) break;
+    last = i;
+  }
+  return last;
+}
+
+/** Net count of '(' minus ')' on a line, ignoring strings and # comments. */
+function parenBalance(line: string): number {
+  let balance = 0;
+  let inString = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inString) {
+      if (c === '\\') i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+    } else if (c === '#') {
+      break;
+    } else if (c === '(') {
+      balance++;
+    } else if (c === ')') {
+      balance--;
+    }
+  }
+  return balance;
+}
+
+/**
+ * Finds the last line of the directive that starts at `start`. PAKET ignores line breaks,
+ * so a directive carries on over the following lines until its parentheses balance.
+ */
+function directiveEnd(lines: string[], start: number): number {
+  let balance = parenBalance(lines[start]);
+  let end = start;
+  while (balance > 0 && end + 1 < lines.length) {
+    end++;
+    balance += parenBalance(lines[end]);
+  }
+  return end;
+}
+
+/** A directive's lines joined into one, so it can be matched like a single-line directive. */
+function directiveText(lines: string[], span: LineSpan): string {
+  return lines.slice(span.start, span.end + 1).map(line => line.trim()).join(' ');
+}
+
+/**
+ * Parses one object state from its lines: optional blank or comment lines, then `state(...):`
+ * and its body. Lines that aren't one of the directives the panel edits are kept in `rules`.
+ */
+function parseStateLines(stateLines: string[]): { state: PakObjectState; layout: StateLayout } | undefined {
+  const headerIdx = stateLines.findIndex(line => !isBlankOrComment(line));
+  if (headerIdx < 0) return undefined;
+  const header: LineSpan = { start: headerIdx, end: directiveEnd(stateLines, headerIdx) };
+  const headerMatch = directiveText(stateLines, header).match(/^state\s*\((.*?)\)\s*:/i);
+  if (!headerMatch) return undefined;
+
+  const stateArgs = parseArgs(headerMatch[1]);
+  const layout: StateLayout = { header };
+  let image: PakImageRef | undefined = undefined;
+  let animation: PakAnimationRef | undefined = undefined;
+  let collisionMask: string[] | undefined = undefined;
+  let selectionType: PakObjectState['selectionType'] = undefined;
+  const rules: string[] = [];
+
+  let k = header.end + 1;
+  while (k < stateLines.length) {
+    if (!stateLines[k].trim()) {
+      k++;
+      continue;
+    }
+
+    const span: LineSpan = { start: k, end: directiveEnd(stateLines, k) };
+    const t = directiveText(stateLines, span);
+
+    if (/^image\s*\(/i.test(t)) {
+      image = parseImageDirective(t);
+      animation = undefined;
+      layout.sprite = span;
+    } else if (/^empty-image\s*\(/i.test(t)) {
+      // A transparent sprite of a given size. It has no image to edit, but choosing one replaces it.
+      image = undefined;
+      animation = undefined;
+      layout.sprite = span;
+    } else if (/^animation\s*\(/i.test(t)) {
+      // PAKET reads animation(tempo, frame, frame, ...): followed by one image(...) per distinct frame.
+      const animArgs = parseArgs(t.match(/^animation\s*\((.*?)\)/i)?.[1] ?? '');
+      const speed = parseInt(animArgs[0], 10) || 10;
+      const sequence = animArgs.slice(1).map(s => parseInt(s, 10) || 0);
+      const frameCount = sequence.length > 0 ? new Set(sequence).size : Infinity;
+      const frames: PakImageRef[] = [];
+      let imagesRead = 0;
+      let j = span.end + 1;
+      while (j < stateLines.length && imagesRead < frameCount) {
+        if (isBlankOrComment(stateLines[j])) {
+          j++;
+          continue;
+        }
+        const frameSpan: LineSpan = { start: j, end: directiveEnd(stateLines, j) };
+        const ft = directiveText(stateLines, frameSpan);
+        if (!/^image\s*\(/i.test(ft)) break;
+        if (frameCount === Infinity && getIndentation(stateLines[j]) <= getIndentation(stateLines[k])) break;
+        const frame = parseImageDirective(ft);
+        if (frame) frames.push(frame);
+        imagesRead++;
+        span.end = frameSpan.end;
+        j = frameSpan.end + 1;
+      }
+      image = undefined;
+      animation = { speed, sequence: sequence.length > 0 ? sequence : undefined, frames };
+      layout.sprite = span;
+    } else if (/^collisionmask\s*\(/i.test(t)) {
+      const maskMatch = t.match(/^collisionmask\s*\((.*?)\)/i);
+      collisionMask = maskMatch ? parseArgs(maskMatch[1]).map(stripQuotes) : undefined;
+      layout.collisionMask = span;
+    } else if (/^(?:selection|selection-type)\s*\(/i.test(t)) {
+      const selMatch = t.match(/^(?:selection|selection-type)\s*\((.*?)\)/i);
+      const val = stripQuotes(parseArgs(selMatch?.[1] ?? '')[0] ?? '').toLowerCase();
+      if (val === 'pixel' || val === 'box' || val === 'none') {
+        selectionType = val;
+        layout.selection = span;
+      } else {
+        rules.push(...stateLines.slice(span.start, span.end + 1));
+      }
+    } else {
+      rules.push(...stateLines.slice(span.start, span.end + 1));
+    }
+    k = span.end + 1;
+  }
+
+  return {
+    state: {
+      name: stripQuotes(stateArgs[0] || 'idle'),
+      direction: stripQuotes(stateArgs[1] || 'front'),
+      image,
+      animation,
+      collisionMask: collisionMask && collisionMask.length > 0 ? collisionMask : undefined,
+      selectionType,
+      rules
+    },
+    layout
+  };
+}
+
+/**
+ * Splits an object's body (the lines after its header) into states and object-level lines.
+ * Blank and comment lines just before a state travel with that state; everything that isn't
+ * part of a state (rules, comments after the last state) is kept verbatim in `rules`.
+ */
+/** An object body in file order: runs of object-level lines, and slots where a state was written. */
+type ObjectBodyPart = { kind: 'lines'; lines: string[] } | { kind: 'state' };
+
+function parseObjectBody(body: string[]): { states: PakObjectState[]; rules: string[]; parts: ObjectBodyPart[] } {
+  const states: PakObjectState[] = [];
+  const rules: string[] = [];
+  const parts: ObjectBodyPart[] = [];
+  const directImages: PakImageRef[] = [];
+  let pending: string[] = [];
+
+  const keepLines = (kept: string[]) => {
+    if (kept.length === 0) return;
+    rules.push(...kept);
+    const last = parts[parts.length - 1];
+    if (last?.kind === 'lines') last.lines.push(...kept);
+    else parts.push({ kind: 'lines', lines: [...kept] });
+  };
+
+  let k = 0;
+  while (k < body.length) {
+    const line = body[k];
+    const t = line.trim();
+
+    if (isBlankOrComment(line)) {
+      pending.push(line);
+      k++;
+      continue;
+    }
+
+    if (/^state\s*\(/i.test(t)) {
+      const stateIndent = getIndentation(line);
+      const stateLines = [...pending, line];
+      pending = [];
+      k++;
+      // The state's body is everything indented deeper than state(...), plus the state directives
+      // that follow it at any indentation (PAKET ignores indentation). Blank lines and shallower
+      // comments only count as part of it when more of the body follows them.
+      let held: string[] = [];
+      while (k < body.length) {
+        const bodyLine = body[k];
+        if (getIndentation(bodyLine) > stateIndent || isStateDirective(bodyLine)) {
+          const end = directiveEnd(body, k);
+          stateLines.push(...held, ...body.slice(k, end + 1));
+          held = [];
+          k = end + 1;
+        } else if (isBlankOrComment(bodyLine)) {
+          held.push(bodyLine);
+          k++;
+        } else {
+          break;
+        }
+      }
+      pending = held;
+
+      const parsed = parseStateLines(stateLines);
+      if (parsed) {
+        states.push({ ...parsed.state, source: stateLines });
+        parts.push({ kind: 'state' });
+      } else {
+        keepLines(stateLines);
+      }
+      continue;
+    }
+
+    if (/^image\s*\(/i.test(t)) {
+      // An image before any state isn't valid PAKET; it is shown in the panel as a default state, as before.
+      const img = parseImageDirective(t);
+      if (img) directImages.push(img);
+      keepLines(pending);
+    } else {
+      keepLines([...pending, line]);
+    }
+    pending = [];
+    k++;
+  }
+  keepLines(pending);
+
+  if (states.length === 0 && directImages.length > 0) {
+    states.push({ name: 'idle', direction: 'front', image: directImages[0], rules: [] });
+  }
+
+  return { states, rules, parts };
+}
+
+function isStateDirective(line: string): boolean {
+  return /^(?:image|empty-image|animation|collisionmask|selection|selection-type)\s*\(/i.test(line.trim());
+}
+
+/** Where, within an item's block, each directive the Items panel edits was written. */
+interface ItemLayout {
+  header: LineSpan;
+  image?: LineSpan;
+  useMessage?: LineSpan;
+}
+
+/**
+ * Parses the body of an item block (`block[0]` is its `item(...):` header). Lines other than
+ * comments and the directives the panel edits are listed in `rules`.
+ */
+function parseItemBody(block: string[]): Pick<PakItem, 'image' | 'defaultUseMessage' | 'rules'> & { layout: ItemLayout } {
+  const layout: ItemLayout = { header: { start: 0, end: 0 } };
+  let image: PakImageRef | undefined = undefined;
+  let defaultUseMessage: string | undefined = undefined;
+  const rules: string[] = [];
+
+  let k = 1;
+  while (k < block.length) {
+    if (isBlankOrComment(block[k])) {
+      k++;
+      continue;
+    }
+    const span: LineSpan = { start: k, end: directiveEnd(block, k) };
+    const t = directiveText(block, span);
+
+    if (/^image\s*\(/i.test(t)) {
+      image = parseImageDirective(t) ?? image;
+      layout.image = span;
+    } else if (/^default-use-message\s*\(/i.test(t)) {
+      const msgArgs = parseArgs(t.match(/^default-use-message\s*\((.*)\)/i)?.[1] ?? '');
+      if (msgArgs.length > 0) defaultUseMessage = stripQuotes(msgArgs[0]);
+      layout.useMessage = span;
+    } else {
+      rules.push(...block.slice(span.start, span.end + 1));
+    }
+    k = span.end + 1;
+  }
+
+  return { image, defaultUseMessage, rules, layout };
+}
+
 export interface ParseResult {
   items: PakItem[];
   objects: PakObject[];
@@ -116,10 +472,9 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    const trimmed = line.trim();
 
     // Skip empty lines and comment lines
-    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith(';')) {
+    if (isBlankOrComment(line)) {
       i++;
       continue;
     }
@@ -148,57 +503,10 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
         const name = stripQuotes(args[1] || id);
         const description = stripQuotes(args[2] || '');
 
-        i++;
-        let lastContentLine = startLine;
-        const blockLines: string[] = [];
+        const lastContentLine = lastBlockLine(lines, startLine);
+        i = lastContentLine + 1;
 
-        // Collect indented child lines of this item
-        while (i < lines.length) {
-          const childLine = lines[i];
-          const childTrimmed = childLine.trim();
-
-          if (!childTrimmed) {
-            blockLines.push(childLine);
-            i++;
-            continue;
-          }
-
-          if (getIndentation(childLine) > 0) {
-            lastContentLine = i;
-            blockLines.push(childLine);
-            i++;
-          } else {
-            break;
-          }
-        }
-
-        // Parse item body lines
-        let image: PakImageRef | undefined = undefined;
-        let defaultUseMessage: string | undefined = undefined;
-        const rules: string[] = [];
-
-        for (const child of blockLines) {
-          const t = child.trim();
-          if (!t || t.startsWith('#') || t.startsWith(';')) continue;
-
-          if (t.toLowerCase().startsWith('image(')) {
-            const img = parseImageDirective(t);
-            if (img) image = img;
-          } else if (t.toLowerCase().startsWith('default-use-message(')) {
-            const msgMatch = t.match(/^default-use-message\s*\((.*)\)/i);
-            if (msgMatch) {
-              const msgArgs = parseArgs(msgMatch[1]);
-              if (msgArgs.length > 0) {
-                defaultUseMessage = stripQuotes(msgArgs[0]);
-              }
-            }
-          } else {
-            // Keep rules or unparsed lines, preserving indentation
-            rules.push(child);
-          }
-        }
-
-        const endLine = lastContentLine;
+        const { image, defaultUseMessage, rules } = parseItemBody(lines.slice(startLine, lastContentLine + 1));
 
         items.push({
           id,
@@ -209,7 +517,7 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
           rules,
           filePath,
           startLine,
-          endLine
+          endLine: lastContentLine
         });
         continue;
       }
@@ -230,167 +538,11 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
         const name = stripQuotes(args[1] || id);
         const description = stripQuotes(args[2] || '');
 
-        i++;
-        let lastContentLine = startLine;
-        const blockLines: Array<{ lineIndex: number; text: string }> = [];
+        const lastContentLine = lastBlockLine(lines, startLine);
+        i = lastContentLine + 1;
 
-        while (i < lines.length) {
-          const childLine = lines[i];
-          const childTrimmed = childLine.trim();
+        const { states, rules: objectRules } = parseObjectBody(lines.slice(startLine + 1, lastContentLine + 1));
 
-          if (!childTrimmed) {
-            i++;
-            continue;
-          }
-
-          if (getIndentation(childLine) > 0) {
-            lastContentLine = i;
-            blockLines.push({ lineIndex: i, text: childLine });
-            i++;
-          } else {
-            break;
-          }
-        }
-
-        const states: PakObjectState[] = [];
-        const objectRules: string[] = [];
-        const directImages: PakImageRef[] = [];
-
-        let stateIdx = 0;
-        while (stateIdx < blockLines.length) {
-          const item = blockLines[stateIdx];
-          const t = item.text.trim();
-
-          const stateMatch = t.match(/^state\s*\((.*?)\)\s*:/i);
-          if (stateMatch) {
-            const stateArgs = parseArgs(stateMatch[1]);
-            const stateName = stripQuotes(stateArgs[0] || 'idle');
-            const direction = stripQuotes(stateArgs[1] || 'front');
-
-            stateIdx++;
-            let stateImage: PakImageRef | undefined = undefined;
-            let stateAnimation: PakAnimationRef | undefined = undefined;
-            const collisionMask: string[] = [];
-            let selectionType: 'pixel' | 'box' | 'none' | undefined = undefined;
-            const stateRules: string[] = [];
-
-            while (stateIdx < blockLines.length) {
-              const subItem = blockLines[stateIdx];
-              const subTrimmed = subItem.text.trim();
-              const subIndent = getIndentation(subItem.text);
-
-              // State directives are indented further than state(...)
-              if (subIndent <= getIndentation(item.text)) {
-                break;
-              }
-
-              if (subTrimmed.toLowerCase().startsWith('image(')) {
-                const img = parseImageDirective(subTrimmed);
-                if (img) stateImage = img;
-              } else if (subTrimmed.toLowerCase().startsWith('animation(')) {
-                const animMatch = subTrimmed.match(/^animation\s*\((.*?)\)\s*:/i);
-                if (animMatch) {
-                  const animArgs = parseArgs(animMatch[1]);
-                  const speed = parseInt(animArgs[0], 10) || 10;
-                  const loop = parseInt(animArgs[1], 10) || 0;
-                  const sequence = animArgs.length > 2 ? animArgs.slice(1).map(s => parseInt(s, 10) || 0) : undefined;
-                  const frames: PakImageRef[] = [];
-
-                  stateIdx++;
-                  while (stateIdx < blockLines.length) {
-                    const animFrame = blockLines[stateIdx];
-                    const frameTrimmed = animFrame.text.trim();
-                    if (getIndentation(animFrame.text) <= subIndent) {
-                      break;
-                    }
-                    if (frameTrimmed.toLowerCase().startsWith('image(')) {
-                      const fImg = parseImageDirective(frameTrimmed);
-                      if (fImg) frames.push(fImg);
-                    } else if (frameTrimmed.toLowerCase().startsWith('collisionmask(')) {
-                      const maskMatch = frameTrimmed.match(/^collisionmask\s*\((.*?)\)/i);
-                      if (maskMatch) {
-                        const maskArgs = parseArgs(maskMatch[1]);
-                        for (const m of maskArgs) {
-                          collisionMask.push(stripQuotes(m));
-                        }
-                      }
-                    } else if (frameTrimmed.toLowerCase().startsWith('selection(') || frameTrimmed.toLowerCase().startsWith('selection-type(')) {
-                      const selMatch = frameTrimmed.match(/^(?:selection|selection-type)\s*\((.*?)\)/i);
-                      if (selMatch) {
-                        const selArgs = parseArgs(selMatch[1]);
-                        const val = stripQuotes(selArgs[0]).toLowerCase();
-                        if (val === 'pixel' || val === 'box' || val === 'none') {
-                          selectionType = val;
-                        }
-                      }
-                    }
-                    stateIdx++;
-                  }
-                  stateAnimation = { speed, loop, sequence, frames };
-                  continue;
-                }
-              } else if (subTrimmed.toLowerCase().startsWith('collisionmask(')) {
-                const maskMatch = subTrimmed.match(/^collisionmask\s*\((.*?)\)/i);
-                if (maskMatch) {
-                  const maskArgs = parseArgs(maskMatch[1]);
-                  for (const m of maskArgs) {
-                    collisionMask.push(stripQuotes(m));
-                  }
-                }
-              } else if (subTrimmed.toLowerCase().startsWith('selection(') || subTrimmed.toLowerCase().startsWith('selection-type(')) {
-                const selMatch = subTrimmed.match(/^(?:selection|selection-type)\s*\((.*?)\)/i);
-                if (selMatch) {
-                  const selArgs = parseArgs(selMatch[1]);
-                  const val = stripQuotes(selArgs[0]).toLowerCase();
-                  if (val === 'pixel' || val === 'box' || val === 'none') {
-                    selectionType = val;
-                  }
-                }
-              } else {
-                stateRules.push(subItem.text);
-              }
-
-              stateIdx++;
-            }
-
-            if (!stateImage && stateAnimation && stateAnimation.frames.length > 0) {
-              stateImage = stateAnimation.frames[0];
-            }
-
-            states.push({
-              name: stateName,
-              direction,
-              image: stateImage,
-              animation: stateAnimation,
-              collisionMask: collisionMask.length > 0 ? collisionMask : undefined,
-              selectionType,
-              rules: stateRules
-            });
-            continue;
-          }
-
-          // Non-state child line of object (e.g. object-level rule or direct image)
-          if (!t.startsWith('#') && !t.startsWith(';')) {
-            if (t.toLowerCase().startsWith('image(')) {
-              const img = parseImageDirective(t);
-              if (img) directImages.push(img);
-            } else {
-              objectRules.push(item.text);
-            }
-          }
-          stateIdx++;
-        }
-
-        if (states.length === 0 && directImages.length > 0) {
-          states.push({
-            name: 'idle',
-            direction: 'front',
-            image: directImages[0],
-            rules: []
-          });
-        }
-
-        const endLine = lastContentLine;
         objects.push({
           id,
           name,
@@ -399,7 +551,7 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
           rules: objectRules,
           filePath,
           startLine,
-          endLine
+          endLine: lastContentLine
         });
         continue;
       }
@@ -421,35 +573,21 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
         const x = parseInt(args[2], 10) || 0;
         const y = parseInt(args[3], 10) || 0;
         let subroom = false;
+        const otherFlags: string[] = [];
 
         for (let a = 4; a < args.length; a++) {
           const mod = stripQuotes(args[a]).toLowerCase();
           if (mod === 'subroom') {
             subroom = true;
+          } else if (mod) {
+            otherFlags.push(args[a]);
           }
         }
 
-        i++;
-        let lastContentLine = startLine;
-        const rules: string[] = [];
-
-        while (i < lines.length) {
-          const childLine = lines[i];
-          const childTrimmed = childLine.trim();
-
-          if (!childTrimmed) {
-            i++;
-            continue;
-          }
-
-          if (getIndentation(childLine) > 0) {
-            lastContentLine = i;
-            rules.push(childLine);
-            i++;
-          } else {
-            break;
-          }
-        }
+        const lastContentLine = lastBlockLine(lines, startLine);
+        i = lastContentLine + 1;
+        // The rules are the body exactly as written, blank lines between them included.
+        const rules = lines.slice(startLine + 1, lastContentLine + 1);
 
         rooms.push({
           id,
@@ -457,6 +595,7 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
           x,
           y,
           subroom: subroom || undefined,
+          otherFlags: otherFlags.length > 0 ? otherFlags : undefined,
           rules,
           filePath,
           startLine,
@@ -476,77 +615,146 @@ export function parsePakFile(content: string, filePath: string): ParseResult {
  * Generates formatted PAKET code for an Item declaration.
  */
 export function generateItemBlock(item: PakItem): string {
-  const lines: string[] = [];
-  // Identifiers containing hyphens or starting with letter can be bare or quoted
-  const idStr = item.id.includes(' ') ? `"${item.id}"` : item.id;
-  lines.push(`item(${idStr}, "${item.name}", "${item.description}"):`);
+  const lines: string[] = [itemHeader(item)];
 
   if (item.image) {
-    if (item.image.x2 !== undefined && item.image.y2 !== undefined) {
-      lines.push(`    image("${item.image.file}", ${item.image.x1}, ${item.image.y1}, ${item.image.x2}, ${item.image.y2})`);
-    } else {
-      lines.push(`    image("${item.image.file}")`);
-    }
+    lines.push(`    ${imageDirective(item.image)}`);
   }
   if (item.defaultUseMessage) {
     lines.push(`    default-use-message("${item.defaultUseMessage}")`);
   }
-  if (item.rules && item.rules.length > 0) {
-    for (const r of item.rules) {
-      lines.push(r.startsWith('    ') ? r : `    ${r}`);
-    }
-  }
+  lines.push(...indentBodyLines(item.rules ?? [], '    '));
 
   return lines.join('\n');
+}
+
+function itemHeader(item: PakItem): string {
+  // PAKET's item(...) takes an identifier, so the ID stays bare unless it couldn't be one.
+  const idStr = item.id.includes(' ') ? `"${item.id}"` : item.id;
+  return `item(${idStr}, "${item.name}", "${item.description}"):`;
 }
 
 /**
  * Generates formatted PAKET code for an Object declaration.
  */
 export function generateObjectBlock(obj: PakObject): string {
-  const lines: string[] = [];
-  lines.push(`object("${obj.id}", "${obj.name}", "${obj.description}"):`);
+  return [objectHeader(obj), ...objectBodyLines(obj)].join('\n');
+}
 
-  for (const s of obj.states) {
-    lines.push(`    state("${s.name}", "${s.direction}"):`);
-    if (s.image) {
-      if (s.image.x2 !== undefined && s.image.y2 !== undefined) {
-        lines.push(`        image("${s.image.file}", ${s.image.x1}, ${s.image.y1}, ${s.image.x2}, ${s.image.y2})`);
-      } else {
-        lines.push(`        image("${s.image.file}")`);
-      }
-    } else if (s.animation) {
-      const seqStr = s.animation.sequence ? s.animation.sequence.join(', ') : `${s.animation.loop}, ${s.animation.frames.length}`;
-      lines.push(`        animation(${s.animation.speed}, ${seqStr}):`);
-      for (const f of s.animation.frames) {
-        if (f.x2 !== undefined && f.y2 !== undefined) {
-          lines.push(`            image("${f.file}", ${f.x1}, ${f.y1}, ${f.x2}, ${f.y2})`);
-        } else {
-          lines.push(`            image("${f.file}")`);
-        }
-      }
-    }
-    if (s.collisionMask && s.collisionMask.length > 0) {
-      const masks = s.collisionMask.map(m => `"${m}"`).join(', ');
-      lines.push(`        collisionmask(${masks})`);
-    }
-    if (s.selectionType) {
-      lines.push(`        selection(${s.selectionType})`);
-    }
-    if (s.rules && s.rules.length > 0) {
-      for (const r of s.rules) {
-        lines.push(r.startsWith('        ') ? r : `        ${r}`);
-      }
-    }
+function objectHeader(obj: PakObject): string {
+  return `object("${obj.id}", "${obj.name}", "${obj.description}"):`;
+}
+
+function objectBodyLines(obj: PakObject): string[] {
+  return [...obj.states.flatMap(renderState), ...indentBodyLines(obj.rules ?? [], '    ')];
+}
+
+function imageDirective(img: PakImageRef): string {
+  return img.x2 !== undefined && img.y2 !== undefined
+    ? `image("${img.file}", ${img.x1}, ${img.y1}, ${img.x2}, ${img.y2})`
+    : `image("${img.file}")`;
+}
+
+/** The state's image(...) or animation(...) directive. An animation wins: it is what PAKET plays. */
+function spriteLines(s: PakObjectState, indent: string): string[] {
+  if (s.animation) {
+    const { speed, sequence, frames } = s.animation;
+    const frameOrder = sequence && sequence.length > 0 ? sequence : frames.map((_, idx) => idx);
+    return [
+      `${indent}animation(${speed}, ${frameOrder.join(', ')}):`,
+      ...frames.map(f => `${indent}    ${imageDirective(f)}`)
+    ];
+  }
+  return s.image ? [`${indent}${imageDirective(s.image)}`] : [];
+}
+
+function collisionMaskLines(s: PakObjectState, indent: string): string[] {
+  if (!s.collisionMask || s.collisionMask.length === 0) return [];
+  return [`${indent}collisionmask(${s.collisionMask.map(m => `"${m}"`).join(', ')})`];
+}
+
+function selectionLines(s: PakObjectState, indent: string): string[] {
+  return s.selectionType ? [`${indent}selection(${s.selectionType})`] : [];
+}
+
+function generateStateLines(s: PakObjectState): string[] {
+  const indent = '        ';
+  return [
+    `    state("${s.name}", "${s.direction}"):`,
+    ...spriteLines(s, indent),
+    ...collisionMaskLines(s, indent),
+    ...selectionLines(s, indent),
+    ...indentBodyLines(s.rules ?? [], indent)
+  ];
+}
+
+/**
+ * Writes a state. A state read from a file is written as its original lines, with only the
+ * directives whose values changed replaced; anything else in it (comments, blank lines,
+ * directives the panel doesn't edit) stays where it was. New states are generated.
+ */
+function renderState(s: PakObjectState): string[] {
+  const parsed = s.source ? parseStateLines(s.source) : undefined;
+  if (!s.source || !parsed) return generateStateLines(s);
+
+  const { state: original, layout } = parsed;
+  const editor = directiveEditor(s.source, layout.header, [layout.sprite, layout.collisionMask, layout.selection]);
+
+  if (s.name !== original.name || s.direction !== original.direction) {
+    editor.replace(layout.header, indent => [`${indent}state("${s.name}", "${s.direction}"):`]);
+  }
+  // New directives go where PAKET expects them: the sprite first, the mask after it.
+  const afterHeader = layout.header.end + 1;
+  const afterSprite = (layout.sprite ?? layout.header).end + 1;
+  if (!sameValue([s.image, s.animation], [original.image, original.animation])) {
+    editor.replaceOrInsert(layout.sprite, indent => spriteLines(s, indent), afterHeader);
+  }
+  if (!sameValue(s.collisionMask, original.collisionMask)) {
+    editor.replaceOrInsert(layout.collisionMask, indent => collisionMaskLines(s, indent), afterSprite);
+  }
+  if (s.selectionType !== original.selectionType) {
+    const afterLast = Math.max(afterSprite, (layout.collisionMask?.end ?? -1) + 1);
+    editor.replaceOrInsert(layout.selection, indent => selectionLines(s, indent), afterLast);
   }
 
-  if (obj.rules && obj.rules.length > 0) {
-    for (const r of obj.rules) {
-      lines.push(r.startsWith('    ') ? r : `    ${r}`);
-    }
-  }
+  return editor.result();
+}
 
-  return lines.join('\n');
+/**
+ * Collects edits to a block's source lines and applies them together, so line numbers taken
+ * from the original layout stay valid. Replacements keep the indentation of the lines they
+ * replace; insertions use the block's directive indentation.
+ */
+function directiveEditor(source: string[], header: LineSpan, directives: Array<LineSpan | undefined>) {
+  const indentAt = (lineIdx: number) => source[lineIdx].match(/^\s*/)?.[0] ?? '';
+  const firstDirective = directives
+    .filter((span): span is LineSpan => !!span)
+    .sort((a, b) => a.start - b.start)[0];
+  const bodyIndent = firstDirective ? indentAt(firstDirective.start) : `${indentAt(header.start)}    `;
+  const edits: Array<{ at: number; remove: number; lines: string[] }> = [];
+
+  const replace = (span: LineSpan, render: (indent: string) => string[]) => {
+    edits.push({ at: span.start, remove: span.end - span.start + 1, lines: render(indentAt(span.start)) });
+  };
+
+  return {
+    replace,
+    /** Replaces the directive at `span`, or inserts it before line `insertAt` if it wasn't written. */
+    replaceOrInsert(span: LineSpan | undefined, render: (indent: string) => string[], insertAt: number) {
+      if (span) replace(span, render);
+      else edits.push({ at: insertAt, remove: 0, lines: render(bodyIndent) });
+    },
+    result(): string[] {
+      // Apply from the bottom up so earlier line numbers stay valid. Edits inserted at the same
+      // line are applied last-first, so they end up in the order they were requested.
+      const out = [...source];
+      edits
+        .map((edit, order) => ({ ...edit, order }))
+        .sort((a, b) => b.at - a.at || b.order - a.order)
+        .forEach(edit => out.splice(edit.at, edit.remove, ...edit.lines));
+      return out;
+    }
+  };
 }
 
 /**
@@ -580,21 +788,48 @@ export function insertItemIntoContent(content: string, item: PakItem): string {
 export function updateItemInContent(content: string, item: PakItem, targetId: string): string {
   const { items } = parsePakFile(content, item.filePath);
   const matched = items.find(it => it.id === targetId);
-
-  const startLine = matched ? matched.startLine : item.startLine;
-  const endLine = matched ? matched.endLine : item.endLine;
-
   const lines = content.split(/\r?\n/);
-  const blockText = generateItemBlock(item);
-  const blockLines = blockText.split('\n');
 
+  if (matched) {
+    lines.splice(matched.startLine, matched.endLine - matched.startLine + 1, ...renderItemOver(item, matched, lines));
+    return lines.join('\n');
+  }
+
+  const { startLine, endLine } = item;
   if (startLine >= 0 && endLine >= startLine && startLine < lines.length) {
-    lines.splice(startLine, endLine - startLine + 1, ...blockLines);
+    lines.splice(startLine, endLine - startLine + 1, ...generateItemBlock(item).split('\n'));
     return lines.join('\n');
   }
 
   // Fallback if line range was invalid
   return insertItemIntoContent(content, item);
+}
+
+/**
+ * Renders an item for saving over `original` (the same item as currently parsed from `lines`).
+ * Only the header and directives whose values changed are rewritten. The Items panel doesn't
+ * edit rules, so they always stay as written.
+ */
+function renderItemOver(item: PakItem, original: PakItem, lines: string[]): string[] {
+  const block = lines.slice(original.startLine, original.endLine + 1);
+  const { layout } = parseItemBody(block);
+  const editor = directiveEditor(block, layout.header, [layout.image, layout.useMessage]);
+
+  if (item.id !== original.id || item.name !== original.name || item.description !== original.description) {
+    editor.replace(layout.header, () => [itemHeader(item)]);
+  }
+  if (!sameValue(item.image, original.image)) {
+    editor.replaceOrInsert(layout.image, indent => (item.image ? [`${indent}${imageDirective(item.image)}`] : []), layout.header.end + 1);
+  }
+  if (item.defaultUseMessage !== original.defaultUseMessage) {
+    editor.replaceOrInsert(
+      layout.useMessage,
+      indent => (item.defaultUseMessage ? [`${indent}default-use-message("${item.defaultUseMessage}")`] : []),
+      (layout.image ?? layout.header).end + 1
+    );
+  }
+
+  return editor.result();
 }
 
 /**
@@ -638,21 +873,49 @@ export function insertObjectIntoContent(content: string, obj: PakObject): string
 }
 
 /**
+ * Renders an object for saving over `original` (the same object as currently parsed from `lines`).
+ * The body is rebuilt in its original order: the panel's states fill the places where states were
+ * written, and object-level lines (rules, comments) stay where they are, since the Objects panel
+ * doesn't edit them. States added in the panel go after the last existing one.
+ */
+function renderObjectOver(obj: PakObject, original: PakObject, lines: string[]): string[] {
+  if (sameValue(objectContent(obj), objectContent(original))) {
+    return lines.slice(original.startLine, original.endLine + 1);
+  }
+  const sameHeader = obj.id === original.id && obj.name === original.name && obj.description === original.description;
+  const { parts } = parseObjectBody(lines.slice(original.startLine + 1, original.endLine + 1));
+  const states = obj.states.map(renderState);
+  const slots = parts.filter(part => part.kind === 'state').length;
+  const addedStates = states.slice(slots).flat();
+  const lastSlot = parts.map(part => part.kind).lastIndexOf('state');
+
+  const body: string[] = lastSlot < 0 ? [...addedStates] : [];
+  let nextState = 0;
+  parts.forEach((part, idx) => {
+    if (part.kind === 'lines') body.push(...part.lines);
+    else body.push(...(states[nextState++] ?? []));
+    if (idx === lastSlot) body.push(...addedStates);
+  });
+
+  return [sameHeader ? lines[original.startLine] : objectHeader(obj), ...body];
+}
+
+/**
  * Updates an existing object block in content by replacing its line range.
  */
 export function updateObjectInContent(content: string, obj: PakObject, targetId: string): string {
   const { objects } = parsePakFile(content, obj.filePath);
   const matched = objects.find(o => o.id === targetId);
-
-  const startLine = matched ? matched.startLine : obj.startLine;
-  const endLine = matched ? matched.endLine : obj.endLine;
-
   const lines = content.split(/\r?\n/);
-  const blockText = generateObjectBlock(obj);
-  const blockLines = blockText.split('\n');
 
+  if (matched) {
+    lines.splice(matched.startLine, matched.endLine - matched.startLine + 1, ...renderObjectOver(obj, matched, lines));
+    return lines.join('\n');
+  }
+
+  const { startLine, endLine } = obj;
   if (startLine >= 0 && endLine >= startLine && startLine < lines.length) {
-    lines.splice(startLine, endLine - startLine + 1, ...blockLines);
+    lines.splice(startLine, endLine - startLine + 1, ...generateObjectBlock(obj).split('\n'));
     return lines.join('\n');
   }
 
@@ -681,16 +944,13 @@ export function deleteObjectFromContent(content: string, targetId: string, fileP
  */
 export function generateRoomBlock(room: PakRoom): string {
   const lines: string[] = [];
-  const idStr = room.id.includes(' ') ? `"${room.id}"` : room.id;
+  // PAKET's room(...) requires a string ID, so it is always quoted (unlike item IDs, which are identifiers).
+  const idStr = `"${room.id}"`;
   const tmxStr = `"${room.tmxFile}"`;
-  const subroomStr = room.subroom ? ', subroom' : '';
-  lines.push(`room(${idStr}, ${tmxStr}, ${room.x}, ${room.y}${subroomStr}):`);
-
-  if (room.rules && room.rules.length > 0) {
-    for (const r of room.rules) {
-      lines.push(r.startsWith('    ') ? r : `    ${r}`);
-    }
-  }
+  const flags = [...(room.subroom ? ['subroom'] : []), ...(room.otherFlags ?? [])];
+  const flagsStr = flags.map(f => `, ${f}`).join('');
+  lines.push(`room(${idStr}, ${tmxStr}, ${room.x}, ${room.y}${flagsStr}):`);
+  lines.push(...indentBodyLines(room.rules ?? [], '    '));
 
   return lines.join('\n');
 }
@@ -719,21 +979,41 @@ export function insertRoomIntoContent(content: string, room: PakRoom): string {
 }
 
 /**
+ * Renders a room for saving over `original` (the same room as currently parsed from `lines`).
+ * The header and the rules body are each kept exactly as written unless the room changed them.
+ */
+function renderRoomOver(room: PakRoom, original: PakRoom, lines: string[]): string[] {
+  const generated = generateRoomBlock(room).split('\n');
+  const sameHeader =
+    room.id === original.id &&
+    room.tmxFile === original.tmxFile &&
+    room.x === original.x &&
+    room.y === original.y &&
+    !!room.subroom === !!original.subroom &&
+    sameValue(room.otherFlags ?? [], original.otherFlags ?? []);
+  const sameRules = sameBodyLines(room.rules, original.rules);
+
+  const header = sameHeader ? [lines[original.startLine]] : generated.slice(0, 1);
+  const body = sameRules ? lines.slice(original.startLine + 1, original.endLine + 1) : generated.slice(1);
+  return [...header, ...body];
+}
+
+/**
  * Updates an existing room declaration block in content by replacing its line range.
  */
 export function updateRoomInContent(content: string, room: PakRoom, targetId: string): string {
   const { rooms } = parsePakFile(content, room.filePath);
   const matched = rooms.find(r => r.id === targetId);
-
-  const startLine = matched ? matched.startLine : room.startLine;
-  const endLine = matched ? matched.endLine : room.endLine;
-
   const lines = content.split(/\r?\n/);
-  const blockText = generateRoomBlock(room);
-  const blockLines = blockText.split('\n');
 
+  if (matched) {
+    lines.splice(matched.startLine, matched.endLine - matched.startLine + 1, ...renderRoomOver(room, matched, lines));
+    return lines.join('\n');
+  }
+
+  const { startLine, endLine } = room;
   if (startLine >= 0 && endLine >= startLine && startLine < lines.length) {
-    lines.splice(startLine, endLine - startLine + 1, ...blockLines);
+    lines.splice(startLine, endLine - startLine + 1, ...generateRoomBlock(room).split('\n'));
     return lines.join('\n');
   }
 

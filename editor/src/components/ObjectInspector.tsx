@@ -871,7 +871,17 @@ export const ObjectInspector: React.FC<ObjectInspectorProps> = ({
                   />
                 </div>
 
-                {activeState && (
+                {activeState?.animation ? (
+                  // The single-image fields below would edit nothing that is saved for an animation.
+                  <div className="sprite-fields">
+                    <div className="form-group">
+                      <span className="form-hint">
+                        This state is an animation of {activeState.animation.frames.length} frame
+                        {activeState.animation.frames.length === 1 ? '' : 's'}. Edit its frames in the code editor.
+                      </span>
+                    </div>
+                  </div>
+                ) : activeState && (
                   <div className="sprite-fields">
                     <div className="form-group">
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>

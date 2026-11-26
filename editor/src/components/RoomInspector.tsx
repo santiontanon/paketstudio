@@ -285,10 +285,9 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
       return;
     }
 
-    const rulesLines = editRulesText
-      .split('\n')
-      .map(line => line.trimEnd())
-      .filter(line => line.length > 0);
+    // Keep blank lines between rules as typed; only drop the ones at the end.
+    const rulesLines = editRulesText.trimEnd().split('\n').map(line => line.trimEnd());
+    if (rulesLines.length === 1 && rulesLines[0] === '') rulesLines.pop();
 
     const updatedRoom: PakRoom = {
       ...activeRoom,
@@ -690,7 +689,7 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                   title="Open room rules & script editor"
                 >
                   <FileText size={13} />
-                  <span>Rules ({activeRoom.rules.length})</span>
+                  <span>Rules ({activeRoom.rules.filter(line => line.trim() !== '').length})</span>
                 </button>
 
                 <button
