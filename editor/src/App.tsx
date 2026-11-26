@@ -34,10 +34,11 @@ import {
   getPlatformDefaultTolerance, 
   rgbToHex 
 } from './utils/palettes';
-import { normalizePath, isSamePath } from './utils/paths';
+import { normalizePath, isAbsolutePath, isSamePath } from './utils/paths';
 import {
   copiesAfterSavingAll,
   copiesAfterTextSave,
+  dirtyPakCopyForPath,
   isSameProjectFile,
   latestPakContent,
   viewTypeForFileName,
@@ -672,9 +673,11 @@ export const App: React.FC = () => {
       let content = '';
       let isDirty = false;
       // A .pak the panels have edited but not saved opens with those edits, so the tab stays the newest copy.
-      const panelCopy = ext === 'pak' ? inMemoryPakFiles[file.relative_path] : undefined;
-      if (panelCopy?.isDirty) {
-        content = panelCopy.content;
+      const dirtyCopy = ext === 'pak' && projectPath
+        ? dirtyPakCopyForPath(file.path, inMemoryPakFiles, projectPath)
+        : undefined;
+      if (dirtyCopy !== undefined) {
+        content = dirtyCopy;
         isDirty = true;
       } else if (!BINARY_EXTENSIONS.has(ext)) {
         content = await invoke<string>('read_text_file', { filePath: file.path });
@@ -762,10 +765,10 @@ export const App: React.FC = () => {
   // Jump from inspector to line in code editor
   const handleOpenCodeAtLine = async (relPath: string, line: number) => {
     if (!projectPath) return;
-    const fullPath = relPath.startsWith('/') ? relPath : `${projectPath}/${relPath}`;
-    const title = relPath.split('/').pop() || relPath;
+    const fullPath = isAbsolutePath(relPath) ? relPath : `${projectPath}/${relPath}`;
+    const title = relPath.split(/[/\\]/).pop() || relPath;
 
-    const existing = tabs.find(t => isSamePath(t.filePath, fullPath) || isSamePath(t.filePath, relPath) || t.filePath.endsWith(relPath));
+    const existing = tabs.find(t => isSameProjectFile(t.filePath, relPath, projectPath));
     if (existing) {
       setActiveTabId(existing.id);
       setTabs(prev => prev.map(t =>
@@ -775,13 +778,16 @@ export const App: React.FC = () => {
       ));
     } else {
       try {
-        const content = await invoke<string>('read_text_file', { filePath: fullPath });
+        const dirtyCopy = dirtyPakCopyForPath(fullPath, inMemoryPakFiles, projectPath);
+        const content = dirtyCopy !== undefined
+          ? dirtyCopy
+          : await invoke<string>('read_text_file', { filePath: fullPath });
         const newTab: EditorTab = {
           id: fullPath,
           filePath: fullPath,
           title,
           content,
-          isDirty: false,
+          isDirty: dirtyCopy !== undefined,
           targetLine: line,
           viewType: 'code'
         };
@@ -831,230 +837,135 @@ export const App: React.FC = () => {
 
   // Read the newest text of a .pak file: its open tab, else the panels' copy, else the file on disk
   const getPakContentInMemory = useCallback(async (relPath: string): Promise<string> => {
-    const inEditor = latestPakContent(relPath, inMemoryPakFiles, tabs);
+    if (!projectPath) return '';
+    const inEditor = latestPakContent(relPath, inMemoryPakFiles, tabs, projectPath);
     if (inEditor !== undefined) {
       return inEditor;
     }
-    if (!projectPath) return '';
-    const fullPath = relPath.startsWith('/') ? relPath : `${projectPath}/${relPath}`;
+    const fullPath = isAbsolutePath(relPath) ? relPath : `${projectPath}/${relPath}`;
     return await invoke<string>('read_text_file', { filePath: fullPath });
   }, [inMemoryPakFiles, tabs, projectPath]);
+
+  const syncPakEditToState = useCallback((relPath: string, newContent: string, specialTabId: string) => {
+    if (!projectPath) return;
+    setInMemoryPakFiles(prev => ({
+      ...prev,
+      [relPath]: { content: newContent, isDirty: true }
+    }));
+    setTabs(prev => prev.map(t => {
+      if (isSameProjectFile(t.filePath, relPath, projectPath)) {
+        return { ...t, content: newContent, isDirty: true };
+      }
+      if (t.id === specialTabId) {
+        return { ...t, isDirty: true };
+      }
+      return t;
+    }));
+  }, [projectPath]);
 
   // Transfer item edit to in-memory .pak file and update in-memory items
   const handleTransferItemToMemory = useCallback(async (relPath: string, updatedItem: PakItem, targetId: string) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = updateItemInContent(currentContent, updatedItem, targetId);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:items') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:items');
 
     const { items: newItems } = parsePakFile(newContent, relPath);
     setProjectItems(prev => {
       const others = prev.filter(it => it.filePath !== relPath);
       return [...others, ...newItems];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Delete item from in-memory .pak file
   const handleDeleteItemFromMemory = useCallback(async (relPath: string, targetId: string) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = deleteItemFromContent(currentContent, targetId, relPath);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:items') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:items');
 
     const { items: newItems } = parsePakFile(newContent, relPath);
     setProjectItems(prev => {
       const others = prev.filter(it => it.filePath !== relPath);
       return [...others, ...newItems];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Create new item in in-memory .pak file
   const handleCreateItemInMemory = useCallback(async (relPath: string, newItem: PakItem) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = insertItemIntoContent(currentContent, newItem);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:items') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:items');
 
     const { items: newItems } = parsePakFile(newContent, relPath);
     setProjectItems(prev => {
       const others = prev.filter(it => it.filePath !== relPath);
       return [...others, ...newItems];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Transfer object edit to in-memory .pak file and update in-memory objects
   const handleTransferObjectToMemory = useCallback(async (relPath: string, updatedObj: PakObject, targetId: string) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = updateObjectInContent(currentContent, updatedObj, targetId);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:objects') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:objects');
 
     const { objects: newObjects } = parsePakFile(newContent, relPath);
     setProjectObjects(prev => {
       const others = prev.filter(o => o.filePath !== relPath);
       return [...others, ...newObjects];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Delete object from in-memory .pak file
   const handleDeleteObjectFromMemory = useCallback(async (relPath: string, targetId: string) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = deleteObjectFromContent(currentContent, targetId, relPath);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:objects') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:objects');
 
     const { objects: newObjects } = parsePakFile(newContent, relPath);
     setProjectObjects(prev => {
       const others = prev.filter(o => o.filePath !== relPath);
       return [...others, ...newObjects];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Create new object in in-memory .pak file
   const handleCreateObjectInMemory = useCallback(async (relPath: string, newObj: PakObject) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = insertObjectIntoContent(currentContent, newObj);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:objects') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:objects');
 
     const { objects: newObjects } = parsePakFile(newContent, relPath);
     setProjectObjects(prev => {
       const others = prev.filter(o => o.filePath !== relPath);
       return [...others, ...newObjects];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Transfer room edit to in-memory .pak file and update in-memory rooms
   const handleTransferRoomToMemory = useCallback(async (relPath: string, updatedRoom: PakRoom, targetId: string) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = updateRoomInContent(currentContent, updatedRoom, targetId);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:rooms') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:rooms');
 
     const { rooms: newRooms } = parsePakFile(newContent, relPath);
     setProjectRooms(prev => {
       const others = prev.filter(r => r.filePath !== relPath);
       return [...others, ...newRooms];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Delete room from in-memory .pak file
   const handleDeleteRoomFromMemory = useCallback(async (relPath: string, targetId: string) => {
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = deleteRoomFromContent(currentContent, targetId, relPath);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:rooms') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:rooms');
 
     const { rooms: newRooms } = parsePakFile(newContent, relPath);
     setProjectRooms(prev => {
       const others = prev.filter(r => r.filePath !== relPath);
       return [...others, ...newRooms];
     });
-  }, [getPakContentInMemory]);
+  }, [getPakContentInMemory, syncPakEditToState]);
 
   // Create new room in in-memory .pak file and optionally starter .tmx
   const handleCreateRoomInMemory = useCallback(async (relPath: string, newRoom: PakRoom, tmxContent?: string) => {
@@ -1070,28 +981,14 @@ export const App: React.FC = () => {
 
     const currentContent = await getPakContentInMemory(relPath);
     const newContent = insertRoomIntoContent(currentContent, newRoom);
-
-    setInMemoryPakFiles(prev => ({
-      ...prev,
-      [relPath]: { content: newContent, isDirty: true }
-    }));
-
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === 'special:rooms') {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
+    syncPakEditToState(relPath, newContent, 'special:rooms');
 
     const { rooms: newRooms } = parsePakFile(newContent, relPath);
     setProjectRooms(prev => {
       const others = prev.filter(r => r.filePath !== relPath);
       return [...others, ...newRooms];
     });
-  }, [getPakContentInMemory, projectPath, refreshFiles]);
+  }, [getPakContentInMemory, syncPakEditToState, projectPath, refreshFiles]);
 
   // Save all dirty in-memory files and tabs to disk
   const handleSaveAllDirtyFiles = useCallback(async () => {
@@ -1100,7 +997,7 @@ export const App: React.FC = () => {
     const unsavedCopies: string[] = [];
     for (const [relPath, fileData] of Object.entries(inMemoryPakFiles)) {
       if (fileData.isDirty) {
-        const fullPath = relPath.startsWith('/') ? relPath : `${projectPath}/${relPath}`;
+        const fullPath = isAbsolutePath(relPath) ? relPath : `${projectPath}/${relPath}`;
         try {
           await invoke('write_text_file', { filePath: fullPath, content: fileData.content });
           setConsoleOutput(prev => prev + `Saved: ${relPath}\n`);
@@ -1112,6 +1009,7 @@ export const App: React.FC = () => {
     }
 
     const savedTextTabs: Array<{ filePath: string; content: string }> = [];
+    const failedTabIds = new Set<string>();
     for (const tab of tabs) {
       if (tab.isDirty && !tab.filePath.startsWith('special:')) {
         try {
@@ -1124,15 +1022,20 @@ export const App: React.FC = () => {
           setConsoleOutput(prev => prev + `Saved: ${tab.title}\n`);
         } catch (err) {
           console.error(`Failed to save ${tab.title}:`, err);
+          failedTabIds.add(tab.id);
         }
       }
     }
 
     // A tab saved after the panels' copy of the same file holds newer text: the copy takes that
     // text, so a later panel edit doesn't start from (and save) older text.
-    setInMemoryPakFiles(prev => copiesAfterSavingAll(prev, savedTextTabs, unsavedCopies));
+    setInMemoryPakFiles(prev => copiesAfterSavingAll(prev, savedTextTabs, unsavedCopies, projectPath));
 
-    setTabs(prev => prev.map(t => ({ ...t, isDirty: false })));
+    setTabs(prev => prev.map(t => (
+      failedTabIds.has(t.id) || (t.filePath.startsWith('special:') && unsavedCopies.length > 0)
+        ? t
+        : { ...t, isDirty: false }
+    )));
   }, [projectPath, inMemoryPakFiles, tabs]);
 
   const hasDirtyPakFiles = useMemo(() => {
@@ -1186,14 +1089,16 @@ export const App: React.FC = () => {
       // If a .pak file was saved in Monaco, the panels' copy of it is now older than the file:
       // replace it with the saved text so the next panel edit starts from it, and reload the inspectors.
       if (current.filePath.toLowerCase().endsWith('.pak')) {
-        setInMemoryPakFiles(prev => copiesAfterTextSave(prev, current.filePath, current.content));
+        if (projectPath) {
+          setInMemoryPakFiles(prev => copiesAfterTextSave(prev, current.filePath, current.content, projectPath));
+        }
         reloadProjectInspectors(files);
       }
     } catch (err) {
       console.error('Failed to save file:', err);
       setConsoleOutput(prev => prev + `Error saving ${current.title}: ${err}\n`);
     }
-  }, [handleSaveAllDirtyFiles, files, reloadProjectInspectors]);
+  }, [handleSaveAllDirtyFiles, files, reloadProjectInspectors, projectPath]);
 
   // Apply changes from Palette Manager and save to .pak file
   const handleApplyPalette = useCallback(async (newPalette: PaletteColor[], newTolerance: number) => {
@@ -1423,23 +1328,25 @@ export const App: React.FC = () => {
     if (!file || !projectPath) return;
 
     // Resolve file path
-    let fullPath = file;
-    if (!file.startsWith('/')) {
-      fullPath = `${projectPath}/${file}`;
-    }
+    const fullPath = isAbsolutePath(file) ? file : `${projectPath}/${file}`;
 
     // Find or open tab
-    let existingTab = tabs.find(t => t.filePath === fullPath || t.filePath.endsWith(file));
+    const existingTab = tabs.find(t => isSameProjectFile(t.filePath, file, projectPath));
     if (!existingTab) {
       try {
-        const content = await invoke<string>('read_text_file', { filePath: fullPath });
+        const title = file.split(/[/\\]/).pop() || file;
+        const dirtyCopy = dirtyPakCopyForPath(fullPath, inMemoryPakFiles, projectPath);
+        const content = dirtyCopy !== undefined
+          ? dirtyCopy
+          : await invoke<string>('read_text_file', { filePath: fullPath });
         const newTab: EditorTab = {
           id: fullPath,
           filePath: fullPath,
-          title: file.split(/[/\\]/).pop() || file,
+          title,
           content,
-          isDirty: false,
+          isDirty: dirtyCopy !== undefined,
           targetLine: line,
+          viewType: viewTypeForFileName(title),
         };
         setTabs(prev => [...prev, newTab]);
         setActiveTabId(newTab.id);

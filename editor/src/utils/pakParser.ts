@@ -177,8 +177,26 @@ function lastBlockLine(lines: string[], headerLine: number): number {
   return last;
 }
 
-/** Net count of '(' minus ')' on a line, ignoring strings and # comments. */
+/** Strips a trailing # comment outside double-quoted strings from a single line. */
+function stripInlineComment(line: string): string {
+  let inString = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inString) {
+      if (c === '\\') i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') {
+      inString = true;
+    } else if (c === '#') {
+      return line.slice(0, i);
+    }
+  }
+  return line;
+}
+
+/** Net count of '(' minus ')' on a line, ignoring strings and comments. */
 function parenBalance(line: string): number {
+  if (isBlankOrComment(line)) return 0;
   let balance = 0;
   let inString = false;
   for (let i = 0; i < line.length; i++) {
@@ -213,9 +231,13 @@ function directiveEnd(lines: string[], start: number): number {
   return end;
 }
 
-/** A directive's lines joined into one, so it can be matched like a single-line directive. */
+/** A directive's lines joined into one without inline # comments, so it can be matched like a single-line directive. */
 function directiveText(lines: string[], span: LineSpan): string {
-  return lines.slice(span.start, span.end + 1).map(line => line.trim()).join(' ');
+  return lines
+    .slice(span.start, span.end + 1)
+    .map(line => stripInlineComment(line).trim())
+    .filter(Boolean)
+    .join(' ');
 }
 
 /**

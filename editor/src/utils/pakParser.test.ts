@@ -313,6 +313,39 @@ describe('saving an object', () => {
       ].join('\n')
     );
   });
+
+  it('ignores inline # comments inside a multi-line collision mask', () => {
+    const pak = [
+      'object("chair", "chair", "A nice-looking chair."):',
+      '    state("idle", "left"):',
+      '        image("objects.png", 0, 0, 8, 16)',
+      '        collisionmask("0000",  # (top row)',
+      '                      # comment-only line',
+      '                      "0000",  # middle',
+      '                      "1111")  # bottom',
+      '',
+    ].join('\n');
+    const chair = object(pak, 'chair');
+    const [idle] = chair.states;
+
+    expect(idle.collisionMask).toEqual(['0000', '0000', '1111']);
+    expect(updateObjectInContent(pak, chair, 'chair')).toBe(pak);
+
+    const saved = updateObjectInContent(
+      pak,
+      { ...chair, states: [{ ...idle, collisionMask: ['0000', '0000', '1110'] }] },
+      'chair'
+    );
+    expect(saved).toBe(
+      [
+        'object("chair", "chair", "A nice-looking chair."):',
+        '    state("idle", "left"):',
+        '        image("objects.png", 0, 0, 8, 16)',
+        '        collisionmask("0000", "0000", "1110")',
+        '',
+      ].join('\n')
+    );
+  });
 });
 
 // The key from PAKET's tutorial 5 (cpc/game.pak), with a comment added.
@@ -343,6 +376,19 @@ describe('saving an item', () => {
     const saved = updateItemInContent(ITEMS_PAK, { ...key, defaultUseMessage: 'Wrong lock.' }, 'item-key');
 
     expect(saved).toBe(ITEMS_PAK.replace('default-use-message("It does not fit here.")', 'default-use-message("Wrong lock.")'));
+  });
+
+  it('ignores a trailing # comment containing parens on default-use-message while keeping # inside quotes', () => {
+    const pak = [
+      'item(item-key, "key", "A key."):',
+      '  image("items.png", 0, 0, 8, 12)',
+      '  default-use-message("Key #1 won\'t fit.")  # (fallback)',
+      '',
+    ].join('\n');
+    const key = item(pak, 'item-key');
+
+    expect(key.defaultUseMessage).toBe("Key #1 won't fit.");
+    expect(updateItemInContent(pak, key, 'item-key')).toBe(pak);
   });
 });
 
