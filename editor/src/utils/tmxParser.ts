@@ -1,5 +1,11 @@
 import type { TmxData, TmxTileset, TmxLayer, TmxObject } from '../types';
-import { MIN_OBJECT_ID, MAX_OBJECT_ID, PLAYER_OBJECT_ID } from '../constants';
+import {
+  MIN_OBJECT_ID,
+  MAX_OBJECT_ID,
+  PLAYER_OBJECT_ID,
+  DEFAULT_BACKGROUND_LAYER_NAME,
+  MIN_ROOM_SIZE
+} from '../constants';
 import { parentDir, isAbsolutePath } from './paths';
 
 /**
@@ -361,5 +367,125 @@ export function getNextAvailableObjectId(objects: TmxObject[], isPlayer = false)
     }
   }
   return 1;
+}
+
+/**
+ * Builds an empty TmxData structure with a single zero-filled background tile layer.
+ */
+export function createEmptyTmxData(
+  width: number,
+  height: number,
+  tilewidth: number,
+  tileheight: number
+): TmxData {
+  const safeW = Math.max(MIN_ROOM_SIZE, Math.floor(width));
+  const safeH = Math.max(MIN_ROOM_SIZE, Math.floor(height));
+  return {
+    width: safeW,
+    height: safeH,
+    tilewidth,
+    tileheight,
+    tilesets: [],
+    layers: [
+      {
+        name: DEFAULT_BACKGROUND_LAYER_NAME,
+        width: safeW,
+        height: safeH,
+        data: new Array(safeW * safeH).fill(0),
+        visible: true,
+      },
+    ],
+    objects: [],
+  };
+}
+
+/**
+ * Returns placed objects that would fall outside a room of `widthTiles` × `heightTiles`.
+ */
+export function getObjectsOutsideRoomBounds(
+  objects: TmxObject[],
+  widthTiles: number,
+  heightTiles: number,
+  tilewidth: number,
+  tileheight: number
+): TmxObject[] {
+  const maxPxW = widthTiles * tilewidth;
+  const maxPxH = heightTiles * tileheight;
+  return objects.filter(
+    obj => obj.x < 0 || obj.y < 0 || obj.x + obj.width > maxPxW || obj.y + obj.height > maxPxH
+  );
+}
+
+/**
+ * Resizes a TMX map to `newWidth` × `newHeight` tiles (anchored top-left).
+ * Existing tile layers are padded with 0 when growing and cropped when shrinking.
+ * Objects outside the new pixel bounds are clamped inside (maintaining CPC even-X alignment
+ * and relative depth offsets).
+ */
+export function resizeTmxData(
+  tmx: TmxData,
+  newWidth: number,
+  newHeight: number,
+  isCpc: boolean
+): { tmx: TmxData; clampedObjects: TmxObject[] } {
+  const safeW = Math.max(MIN_ROOM_SIZE, Math.floor(newWidth));
+  const safeH = Math.max(MIN_ROOM_SIZE, Math.floor(newHeight));
+
+  const nextLayers: TmxLayer[] = tmx.layers.map(layer => {
+    const nextData = new Array<number>(safeW * safeH).fill(0);
+    const copyRows = Math.min(layer.height, safeH);
+    const copyCols = Math.min(layer.width, safeW);
+    for (let r = 0; r < copyRows; r++) {
+      for (let c = 0; c < copyCols; c++) {
+        nextData[r * safeW + c] = layer.data[r * layer.width + c] ?? 0;
+      }
+    }
+    return {
+      ...layer,
+      width: safeW,
+      height: safeH,
+      data: nextData,
+    };
+  });
+
+  const newPixelW = safeW * tmx.tilewidth;
+  const newPixelH = safeH * tmx.tileheight;
+  const clampedObjects: TmxObject[] = [];
+
+  const nextObjects: TmxObject[] = tmx.objects.map(obj => {
+    const maxX = Math.max(0, newPixelW - obj.width);
+    const maxY = Math.max(0, newPixelH - obj.height);
+    let nextX = Math.max(0, Math.min(maxX, obj.x));
+    const nextY = Math.max(0, Math.min(maxY, obj.y));
+
+    if (nextX !== obj.x && isCpc) {
+      nextX = Math.floor(nextX / 2) * 2;
+    }
+
+    if (nextX === obj.x && nextY === obj.y) {
+      return obj;
+    }
+
+    const deltaY = nextY - obj.y;
+    const updated: TmxObject = {
+      ...obj,
+      x: nextX,
+      y: nextY,
+      ...(obj.depth !== undefined ? { depth: obj.depth + deltaY } : {}),
+    };
+    clampedObjects.push(updated);
+    return updated;
+  });
+
+  return {
+    tmx: {
+      ...tmx,
+      width: safeW,
+      height: safeH,
+      layers: nextLayers,
+      objects: nextObjects,
+    },
+    clampedObjects,
+  };
 }
 

@@ -1,4 +1,24 @@
 import type { Platform } from '../types';
+import { MIN_ROOM_SIZE } from '../constants';
+
+const CPC_SCREEN_WIDTH = 128;
+const MSX_SCREEN_WIDTH = 256;
+const DEFAULT_SCREEN_HEIGHT = 192;
+
+const DEFAULT_TILE_WIDTH = 8;
+const MSX_WT_TILE_WIDTH = 16;
+const DEFAULT_TILE_HEIGHT = 8;
+
+const CPC_DEFAULT_COLS = 16;
+const MSX_DEFAULT_COLS = 32;
+const MSX_WT_DEFAULT_COLS = 16;
+
+const DEFAULT_TEXT_AREA_Y = 0;
+const DEFAULT_TEXT_AREA_HEIGHT = 5;
+const DEFAULT_GAME_AREA_Y = 6;
+const DEFAULT_GAME_AREA_HEIGHT = 11;
+const DEFAULT_GUI_AREA_Y = 18;
+const DEFAULT_GUI_AREA_HEIGHT = 6;
 
 export interface ScreenAreaDef {
   x: number; // in tiles
@@ -16,9 +36,9 @@ export interface ScreenGuidelines {
   screenHeight: number;
   tileWidth: number;
   tileHeight: number;
-  textArea?: ScreenAreaDef;
-  gameArea?: ScreenAreaDef;
-  guiArea?: ScreenAreaDef;
+  textArea: ScreenAreaDef;
+  gameArea: ScreenAreaDef;
+  guiArea: ScreenAreaDef;
 }
 
 /**
@@ -30,21 +50,62 @@ export function isCpcPlatform(platform?: string | null): boolean {
 }
 
 /**
+ * Checks if a given platform string represents the MSX wide-tiles (16x8) target.
+ */
+export function isMsxWtPlatform(platform?: string | null): boolean {
+  if (!platform) return false;
+  return platform.toLowerCase() === 'msx-wt';
+}
+
+/**
+ * Default tile pixel dimensions for a target platform.
+ */
+export function getDefaultTileSize(platform: Platform): { tileWidth: number; tileHeight: number } {
+  return {
+    tileWidth: isMsxWtPlatform(platform) ? MSX_WT_TILE_WIDTH : DEFAULT_TILE_WIDTH,
+    tileHeight: DEFAULT_TILE_HEIGHT,
+  };
+}
+
+function makeAreaDef(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  tileWidth: number,
+  tileHeight: number
+): ScreenAreaDef {
+  return {
+    x,
+    y,
+    width,
+    height,
+    pixelX: x * tileWidth,
+    pixelY: y * tileHeight,
+    pixelWidth: width * tileWidth,
+    pixelHeight: height * tileHeight,
+  };
+}
+
+/**
  * Parses screen division guidelines from .pak source text, falling back
- * to standard defaults for MSX or CPC.
+ * to standard defaults for MSX, MSX-WT, or CPC.
  */
 export function getScreenGuidelines(
   platform: Platform,
-  pakTexts: string[] = [],
-  mapTileWidth = 8,
-  mapTileHeight = 8
+  pakTexts: string[],
+  mapTileWidth?: number,
+  mapTileHeight?: number
 ): ScreenGuidelines {
   const isCpc = isCpcPlatform(platform);
+  const isMsxWt = isMsxWtPlatform(platform);
+  const defaultTile = getDefaultTileSize(platform);
 
-  const screenWidth = isCpc ? 128 : 256;
-  const screenHeight = isCpc ? 192 : 192;
-  const tileWidth = mapTileWidth || 8;
-  const tileHeight = mapTileHeight || 8;
+  const screenWidth = isCpc ? CPC_SCREEN_WIDTH : MSX_SCREEN_WIDTH;
+  const screenHeight = DEFAULT_SCREEN_HEIGHT;
+  const tileWidth = mapTileWidth || defaultTile.tileWidth;
+  const tileHeight = mapTileHeight || defaultTile.tileHeight;
+  const defaultCols = isCpc ? CPC_DEFAULT_COLS : (isMsxWt ? MSX_WT_DEFAULT_COLS : MSX_DEFAULT_COLS);
 
   let textMatch: RegExpMatchArray | null = null;
   let gameMatch: RegExpMatchArray | null = null;
@@ -64,98 +125,38 @@ export function getScreenGuidelines(
     if (textMatch && gameMatch && guiMatch) break;
   }
 
-  // Text Area
-  let textArea: ScreenAreaDef;
-  if (textMatch) {
-    const tx = parseInt(textMatch[1], 10);
-    const ty = parseInt(textMatch[2], 10);
-    const tw = parseInt(textMatch[3], 10);
-    const th = parseInt(textMatch[4], 10);
-    textArea = {
-      x: tx,
-      y: ty,
-      width: tw,
-      height: th,
-      pixelX: tx * tileWidth,
-      pixelY: ty * tileHeight,
-      pixelWidth: tw * tileWidth,
-      pixelHeight: th * tileHeight,
-    };
-  } else {
-    const defaultCols = isCpc ? 16 : 32;
-    textArea = {
-      x: 0,
-      y: 0,
-      width: defaultCols,
-      height: 5,
-      pixelX: 0,
-      pixelY: 0,
-      pixelWidth: defaultCols * tileWidth,
-      pixelHeight: 5 * tileHeight,
-    };
-  }
+  const textArea = textMatch
+    ? makeAreaDef(
+        parseInt(textMatch[1], 10),
+        parseInt(textMatch[2], 10),
+        parseInt(textMatch[3], 10),
+        parseInt(textMatch[4], 10),
+        tileWidth,
+        tileHeight
+      )
+    : makeAreaDef(0, DEFAULT_TEXT_AREA_Y, defaultCols, DEFAULT_TEXT_AREA_HEIGHT, tileWidth, tileHeight);
 
-  // Game Area
-  let gameArea: ScreenAreaDef;
-  if (gameMatch) {
-    const gx = parseInt(gameMatch[1], 10);
-    const gy = parseInt(gameMatch[2], 10);
-    const gw = parseInt(gameMatch[3], 10);
-    const gh = parseInt(gameMatch[4], 10);
-    gameArea = {
-      x: gx,
-      y: gy,
-      width: gw,
-      height: gh,
-      pixelX: gx * tileWidth,
-      pixelY: gy * tileHeight,
-      pixelWidth: gw * tileWidth,
-      pixelHeight: gh * tileHeight,
-    };
-  } else {
-    const defaultCols = isCpc ? 16 : 32;
-    gameArea = {
-      x: 0,
-      y: 6,
-      width: defaultCols,
-      height: 11,
-      pixelX: 0,
-      pixelY: 6 * tileHeight,
-      pixelWidth: defaultCols * tileWidth,
-      pixelHeight: 11 * tileHeight,
-    };
-  }
+  const gameArea = gameMatch
+    ? makeAreaDef(
+        parseInt(gameMatch[1], 10),
+        parseInt(gameMatch[2], 10),
+        parseInt(gameMatch[3], 10),
+        parseInt(gameMatch[4], 10),
+        tileWidth,
+        tileHeight
+      )
+    : makeAreaDef(0, DEFAULT_GAME_AREA_Y, defaultCols, DEFAULT_GAME_AREA_HEIGHT, tileWidth, tileHeight);
 
-  // GUI Area
-  let guiArea: ScreenAreaDef;
-  if (guiMatch) {
-    const ux = parseInt(guiMatch[1], 10);
-    const uy = parseInt(guiMatch[2], 10);
-    const defaultCols = isCpc ? 16 : 32;
-    const uh = Math.max(1, Math.round(screenHeight / tileHeight) - uy);
-    guiArea = {
-      x: ux,
-      y: uy,
-      width: defaultCols,
-      height: uh,
-      pixelX: ux * tileWidth,
-      pixelY: uy * tileHeight,
-      pixelWidth: defaultCols * tileWidth,
-      pixelHeight: uh * tileHeight,
-    };
-  } else {
-    const defaultCols = isCpc ? 16 : 32;
-    guiArea = {
-      x: 0,
-      y: 18,
-      width: defaultCols,
-      height: 6,
-      pixelX: 0,
-      pixelY: 18 * tileHeight,
-      pixelWidth: defaultCols * tileWidth,
-      pixelHeight: 6 * tileHeight,
-    };
-  }
+  const guiArea = guiMatch
+    ? makeAreaDef(
+        parseInt(guiMatch[1], 10),
+        parseInt(guiMatch[2], 10),
+        defaultCols,
+        Math.max(1, Math.round(screenHeight / tileHeight) - parseInt(guiMatch[2], 10)),
+        tileWidth,
+        tileHeight
+      )
+    : makeAreaDef(0, DEFAULT_GUI_AREA_Y, defaultCols, DEFAULT_GUI_AREA_HEIGHT, tileWidth, tileHeight);
 
   return {
     screenWidth,
@@ -166,5 +167,68 @@ export function getScreenGuidelines(
     gameArea,
     guiArea,
   };
+}
+
+/**
+ * Maximum room dimensions (in tiles) that fit inside the game area given the room's tile offset.
+ */
+export function getMaxRoomSize(
+  gameAreaWidth: number,
+  gameAreaHeight: number,
+  offsetX: number,
+  offsetY: number
+): { maxWidth: number; maxHeight: number } {
+  return {
+    maxWidth: Math.max(MIN_ROOM_SIZE, gameAreaWidth - Math.max(0, offsetX)),
+    maxHeight: Math.max(MIN_ROOM_SIZE, gameAreaHeight - Math.max(0, offsetY)),
+  };
+}
+
+/**
+ * Maximum room tile offset (x, y) that keeps the room inside the game area.
+ */
+export function getMaxRoomOffset(
+  gameAreaWidth: number,
+  gameAreaHeight: number,
+  roomWidth: number,
+  roomHeight: number
+): { maxOffsetX: number; maxOffsetY: number } {
+  return {
+    maxOffsetX: Math.max(0, gameAreaWidth - roomWidth),
+    maxOffsetY: Math.max(0, gameAreaHeight - roomHeight),
+  };
+}
+
+/**
+ * Validates room dimensions (in tiles) against the game area and room offset.
+ * Returns an error message when invalid, or null when valid.
+ */
+export function validateRoomDimensions(
+  width: number,
+  height: number,
+  offsetX: number,
+  offsetY: number,
+  gameAreaWidth: number,
+  gameAreaHeight: number
+): string | null {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < MIN_ROOM_SIZE || height < MIN_ROOM_SIZE) {
+    return `Dimensions must be at least ${MIN_ROOM_SIZE} × ${MIN_ROOM_SIZE} tiles.`;
+  }
+  const safeOffsetX = Math.max(0, offsetX);
+  const safeOffsetY = Math.max(0, offsetY);
+  const maxWidth = gameAreaWidth - safeOffsetX;
+  const maxHeight = gameAreaHeight - safeOffsetY;
+
+  if (width > maxWidth) {
+    return safeOffsetX > 0
+      ? `Width cannot exceed ${Math.max(0, maxWidth)} tiles (game area width ${gameAreaWidth} minus offset X ${safeOffsetX}).`
+      : `Width cannot exceed ${gameAreaWidth} tiles (game area width).`;
+  }
+  if (height > maxHeight) {
+    return safeOffsetY > 0
+      ? `Height cannot exceed ${Math.max(0, maxHeight)} tiles (game area height ${gameAreaHeight} minus offset Y ${safeOffsetY}).`
+      : `Height cannot exceed ${gameAreaHeight} tiles (game area height).`;
+  }
+  return null;
 }
 

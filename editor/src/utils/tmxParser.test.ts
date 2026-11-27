@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from 'vitest';
 import { parseTmxXml, serializeTmxXml, resolveExternalTilesets, getNextFirstGid, validateObjectIds,
-  getPaketObjectId, setPaketObjectId, isObjectIdTaken, getNextAvailableObjectId } from './tmxParser';
+  getPaketObjectId, setPaketObjectId, isObjectIdTaken, getNextAvailableObjectId,
+  createEmptyTmxData, getObjectsOutsideRoomBounds, resizeTmxData } from './tmxParser';
 import type { TmxObject } from '../types';
 import cpcTemplateRoom from '../../templates/cpc/room.tmx?raw';
 import msxTemplateRoom from '../../templates/msx/room.tmx?raw';
@@ -212,5 +213,93 @@ describe('choosing the ID for a new object', () => {
     const objects = [obj(1, 'door'), obj(2, 'player', { ID: '63' }), obj(5, 'chest', { id: '3' })];
 
     expect(getNextAvailableObjectId(objects)).toBe(4);
+  });
+});
+
+describe('creating an empty room map', () => {
+  it('produces a valid TMX with a zero-filled background layer that round-trips through XML', () => {
+    const empty = createEmptyTmxData(12, 8, 16, 8);
+    const parsed = parseTmxXml(serializeTmxXml(empty));
+
+    expect(parsed.width).toBe(12);
+    expect(parsed.height).toBe(8);
+    expect(parsed.tilewidth).toBe(16);
+    expect(parsed.tileheight).toBe(8);
+    expect(parsed.tilesets).toEqual([]);
+    expect(parsed.objects).toEqual([]);
+    expect(parsed.layers).toHaveLength(1);
+    expect(parsed.layers[0].name).toBe('background');
+    expect(parsed.layers[0].data).toHaveLength(12 * 8);
+    expect(parsed.layers[0].data.every(v => v === 0)).toBe(true);
+  });
+});
+
+describe('resizing a room map', () => {
+  const sampleMap = () => parseTmxXml(`<?xml version="1.0" encoding="UTF-8"?>
+<map version="1.0" orientation="orthogonal" renderorder="right-down" width="3" height="2" tilewidth="8" tileheight="8" nextobjectid="4">
+ <layer name="background" width="3" height="2">
+  <data encoding="csv">
+1,2,3,
+4,5,6
+  </data>
+ </layer>
+ <layer name="collision" width="3" height="2" visible="0">
+  <data encoding="csv">
+9,0,9,
+0,9,0
+  </data>
+ </layer>
+ <objectgroup name="objects">
+  <object id="1" name="inside" x="0" y="0" width="8" height="8"/>
+  <object id="2" name="outside" x="16" y="8" width="8" height="8">
+   <properties>
+    <property name="depth" value="18"/>
+   </properties>
+  </object>
+ </objectgroup>
+</map>`);
+
+  it('pads all tile layers with 0 when growing and preserves existing tiles top-left', () => {
+    const { tmx, clampedObjects } = resizeTmxData(sampleMap(), 4, 3, false);
+
+    expect(tmx.width).toBe(4);
+    expect(tmx.height).toBe(3);
+    expect(tmx.layers[0].data).toEqual([
+      1, 2, 3, 0,
+      4, 5, 6, 0,
+      0, 0, 0, 0,
+    ]);
+    expect(tmx.layers[1].data).toEqual([
+      9, 0, 9, 0,
+      0, 9, 0, 0,
+      0, 0, 0, 0,
+    ]);
+    expect(clampedObjects).toEqual([]);
+  });
+
+  it('crops tile layers and clamps out-of-bounds objects while preserving depth offset', () => {
+    const map = sampleMap();
+    const outBefore = getObjectsOutsideRoomBounds(map.objects, 2, 1, map.tilewidth, map.tileheight);
+    expect(outBefore.map(o => o.name)).toEqual(['outside']);
+
+    const { tmx, clampedObjects } = resizeTmxData(map, 2, 1, false);
+
+    expect(tmx.width).toBe(2);
+    expect(tmx.height).toBe(1);
+    expect(tmx.layers[0].data).toEqual([1, 2]);
+    expect(tmx.layers[1].data).toEqual([9, 0]);
+    expect(clampedObjects).toHaveLength(1);
+    expect(tmx.objects[0]).toMatchObject({ name: 'inside', x: 0, y: 0 });
+    expect(tmx.objects[1]).toMatchObject({ name: 'outside', x: 8, y: 0, depth: 10 });
+  });
+
+  it('enforces even X when clamping objects on CPC', () => {
+    const map = sampleMap();
+    map.objects[1] = { ...map.objects[1], x: 18, width: 7 };
+
+    const { tmx } = resizeTmxData(map, 2, 2, true);
+
+    // maxX = 16 - 7 = 9, snapped to even <= 9 => 8
+    expect(tmx.objects[1].x).toBe(8);
   });
 });

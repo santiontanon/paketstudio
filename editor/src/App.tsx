@@ -34,7 +34,7 @@ import {
   getPlatformDefaultTolerance, 
   rgbToHex 
 } from './utils/palettes';
-import { normalizePath, isAbsolutePath, isSamePath } from './utils/paths';
+import { normalizePath, isAbsolutePath, isSamePath, parentDir } from './utils/paths';
 import {
   copiesAfterSavingAll,
   copiesAfterTextSave,
@@ -125,6 +125,7 @@ export const App: React.FC = () => {
   const [projectItems, setProjectItems] = useState<PakItem[]>([]);
   const [projectObjects, setProjectObjects] = useState<PakObject[]>([]);
   const [projectRooms, setProjectRooms] = useState<PakRoom[]>([]);
+  const [diskPakContents, setDiskPakContents] = useState<Record<string, string>>({});
   const [inMemoryPakFiles, setInMemoryPakFiles] = useState<PakCopies>({});
 
   const [consoleOutput, setConsoleOutput] = useState<string>('');
@@ -227,11 +228,13 @@ export const App: React.FC = () => {
     const allItems: PakItem[] = [];
     const allObjects: PakObject[] = [];
     const allRooms: PakRoom[] = [];
+    const loadedPakContents: Record<string, string> = {};
     let customPal: (ParsedCustomPalette & { sourceFile: string }) | null = null;
 
     for (const pf of pakFiles) {
       try {
         const content = await invoke<string>('read_text_file', { filePath: pf.path });
+        loadedPakContents[pf.relative_path] = content;
         const { items, objects, rooms } = parsePakFile(content, pf.relative_path);
         allItems.push(...items);
         allObjects.push(...objects);
@@ -251,6 +254,7 @@ export const App: React.FC = () => {
     setProjectItems(allItems);
     setProjectObjects(allObjects);
     setProjectRooms(allRooms);
+    setDiskPakContents(loadedPakContents);
 
     if (customPal) {
       const defaultPal = getPlatformPalette(activePlat);
@@ -461,6 +465,8 @@ export const App: React.FC = () => {
     setLastCompileStatus(null);
     setProjectItems([]);
     setProjectObjects([]);
+    setProjectRooms([]);
+    setDiskPakContents({});
     setInMemoryPakFiles({});
     setConsoleOutput('Project closed.\n');
     setSettings(prev => ({ ...prev, mainPakRelative: '' }));
@@ -970,13 +976,14 @@ export const App: React.FC = () => {
   // Create new room in in-memory .pak file and optionally starter .tmx
   const handleCreateRoomInMemory = useCallback(async (relPath: string, newRoom: PakRoom, tmxContent?: string) => {
     if (tmxContent && projectPath) {
-      const tmxFullPath = `${projectPath}/${newRoom.tmxFile}`;
-      try {
-        await invoke('write_text_file', { filePath: tmxFullPath, content: tmxContent });
-        await refreshFiles(projectPath);
-      } catch (err) {
-        console.error('Failed to create initial TMX file:', err);
-      }
+      const pakDir = parentDir(relPath);
+      const tmxRelPath = pakDir && !newRoom.tmxFile.includes('/')
+        ? `${pakDir}/${newRoom.tmxFile}`
+        : newRoom.tmxFile;
+      const tmxFullPath = `${projectPath}/${tmxRelPath}`;
+      await invoke('write_text_file', { filePath: tmxFullPath, content: tmxContent });
+      const fileList = await invoke<FileNode[]>('list_project_files', { projectPath });
+      setFiles(fileList);
     }
 
     const currentContent = await getPakContentInMemory(relPath);
@@ -988,7 +995,7 @@ export const App: React.FC = () => {
       const others = prev.filter(r => r.filePath !== relPath);
       return [...others, ...newRooms];
     });
-  }, [getPakContentInMemory, syncPakEditToState, projectPath, refreshFiles]);
+  }, [getPakContentInMemory, syncPakEditToState, projectPath]);
 
   // Save all dirty in-memory files and tabs to disk
   const handleSaveAllDirtyFiles = useCallback(async () => {
@@ -1041,6 +1048,23 @@ export const App: React.FC = () => {
   const hasDirtyPakFiles = useMemo(() => {
     return Object.values(inMemoryPakFiles).some(f => f.isDirty);
   }, [inMemoryPakFiles]);
+
+  // Latest contents of all project .pak files (open tab > in-memory panel edit > disk copy)
+  const allPakTexts = useMemo(() => {
+    const merged: Record<string, string> = { ...diskPakContents };
+    for (const [relPath, entry] of Object.entries(inMemoryPakFiles)) {
+      merged[relPath] = entry.content;
+    }
+    if (projectPath) {
+      for (const tab of tabs) {
+        if (!tab.filePath.startsWith('special:') && tab.filePath.toLowerCase().endsWith('.pak')) {
+          const matchedKey = Object.keys(merged).find(k => isSameProjectFile(tab.filePath, k, projectPath));
+          merged[matchedKey ?? tab.filePath] = tab.content;
+        }
+      }
+    }
+    return Object.values(merged);
+  }, [diskPakContents, inMemoryPakFiles, tabs, projectPath]);
 
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -1504,7 +1528,7 @@ export const App: React.FC = () => {
                 files={files}
                 projectObjects={projectObjects}
                 platform={settings.selectedPlatform}
-                inMemoryPakFiles={inMemoryPakFiles}
+                pakTexts={allPakTexts}
                 onOpenCodeAtLine={handleOpenCodeAtLine}
                 onTransferToMemory={handleTransferRoomToMemory}
                 onDeleteRoomFromMemory={handleDeleteRoomFromMemory}
@@ -1513,7 +1537,7 @@ export const App: React.FC = () => {
                 hasUnsavedChanges={hasDirtyPakFiles}
                 onRegisterSaveHandler={handleRegisterInspectorSave}
                 onOpenTmxFile={(tmxName) => {
-                  const matched = files.find(f => f.name.toLowerCase() === tmxName.toLowerCase());
+                  const matched = files.find(f => f.name.toLowerCase() === tmxName.toLowerCase() || f.relative_path.toLowerCase() === tmxName.toLowerCase());
                   if (matched) handleFileSelect(matched);
                 }}
               />
@@ -1569,6 +1593,8 @@ export const App: React.FC = () => {
           onClose={() => setIsNewFileModalOpen(false)}
           projectPath={projectPath}
           existingFiles={files}
+          platform={settings.selectedPlatform}
+          pakTexts={allPakTexts}
           onFileCreated={handleFileCreated}
         />
       )}

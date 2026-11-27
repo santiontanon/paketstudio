@@ -47,6 +47,8 @@ interface RoomCanvasProps {
   files: FileNode[];
   platform: Platform;
   screenGuidelines: ScreenGuidelines;
+  roomOffsetX: number;
+  roomOffsetY: number;
   onUpdateObject: (updated: TmxObject, prevId?: number) => void;
   onDeleteObject: (id: number) => void;
   onAddObject: (newObj: TmxObject) => void;
@@ -70,6 +72,8 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
   files,
   platform,
   screenGuidelines,
+  roomOffsetX,
+  roomOffsetY,
   onUpdateObject,
   onDeleteObject,
   onAddObject,
@@ -140,8 +144,12 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
   const canvasHeight = viewMode === 'screen' ? Math.max(roomPixelHeight, screenGuidelines.screenHeight) : roomPixelHeight;
 
   // Origin offset for room when rendered inside full screen mode
-  const roomOriginX = viewMode === 'screen' ? (screenGuidelines.gameArea?.pixelX ?? 0) : 0;
-  const roomOriginY = viewMode === 'screen' ? (screenGuidelines.gameArea?.pixelY ?? 0) : 0;
+  const roomOriginX = viewMode === 'screen'
+    ? screenGuidelines.gameArea.pixelX + roomOffsetX * tmxData.tilewidth
+    : 0;
+  const roomOriginY = viewMode === 'screen'
+    ? screenGuidelines.gameArea.pixelY + roomOffsetY * tmxData.tileheight
+    : 0;
 
   // Directory of active TMX file
   const tmxDir = useMemo(() => (tmxFilePath ? parentDir(tmxFilePath) : ''), [tmxFilePath]);
@@ -1431,7 +1439,9 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
               X: {mousePos.x} px | Y: {mousePos.y} px {isCpc && mousePos.x % 2 !== 0 && '(CPC odd X)'}
             </span>
           ) : (
-            <span>Map: {roomPixelWidth}×{roomPixelHeight} px</span>
+            <span>
+              Map: {tmxData.width}×{tmxData.height} tiles ({roomPixelWidth}×{roomPixelHeight} px)
+            </span>
           )}
         </div>
       </div>

@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
 #[derive(Default, Clone)]
 pub struct ActiveCompiler(Arc<Mutex<Option<Child>>>);
@@ -22,6 +23,9 @@ const BUNDLED_JAVA_PATHS: &[&str] = &[
     "../../../editor/src-tauri/jre/bin/java",
 ];
 const COMPILER_VERSION_PREFIX: &str = "Compiler ";
+const APP_TITLE_PREFIX: &str = "PAKET Studio";
+const MAIN_WINDOW_LABEL: &str = "main";
+const TEMPLATES_DIR: &str = "templates";
 
 fn get_builtin_jar_path() -> Option<String> {
     let cache_dir = std::env::temp_dir().join("paket-studio");
@@ -296,7 +300,12 @@ fn pick_folder() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn create_project(parent_dir: String, project_name: String, platform: String) -> Result<String, String> {
+fn create_project(
+    app: tauri::AppHandle,
+    parent_dir: String,
+    project_name: String,
+    platform: String,
+) -> Result<String, String> {
     let resolved_parent = if parent_dir.starts_with("~/") || parent_dir == "~" {
         if let Ok(home) = std::env::var("HOME") {
             parent_dir.replacen('~', &home, 1)
@@ -325,12 +334,16 @@ fn create_project(parent_dir: String, project_name: String, platform: String) ->
         _ => TEMPLATE_CPC,
     };
 
-    // Locate templates directory
-    let mut candidate_dirs = vec![
-        PathBuf::from("templates").join(template_sub),
-        PathBuf::from("../templates").join(template_sub),
-        PathBuf::from("../../templates").join(template_sub),
-    ];
+    // Locate templates directory (check Tauri's bundled resource dir first across all platforms)
+    let mut candidate_dirs = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        candidate_dirs.push(resource_dir.join(TEMPLATES_DIR).join(template_sub));
+    }
+    candidate_dirs.extend([
+        PathBuf::from(TEMPLATES_DIR).join(template_sub),
+        PathBuf::from("..").join(TEMPLATES_DIR).join(template_sub),
+        PathBuf::from("../..").join(TEMPLATES_DIR).join(template_sub),
+    ]);
 
     if let Ok(cwd) = std::env::current_dir() {
         candidate_dirs.push(cwd.join("templates").join(template_sub));
@@ -899,6 +912,13 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ActiveCompiler::default())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let title = format!("{} v{}", APP_TITLE_PREFIX, app.package_info().version);
+                let _ = window.set_title(&title);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_system_info,
             pick_folder,

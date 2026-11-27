@@ -1,20 +1,25 @@
 import React, { useState, useMemo } from 'react';
 import { safeInvoke as invoke } from '../utils/ipc';
 import { FilePlus, X, AlertCircle } from 'lucide-react';
-import type { FileNode } from '../types';
-import { 
-  NEW_FILE_TYPES, 
-  DEFAULT_NEW_PAK_NAME, 
+import type { FileNode, Platform } from '../types';
+import {
+  NEW_FILE_TYPES,
+  DEFAULT_NEW_PAK_NAME,
   DEFAULT_NEW_PNG_NAME,
-  DEFAULT_IMAGE_WIDTH, 
-  DEFAULT_IMAGE_HEIGHT 
+  DEFAULT_NEW_TMX_NAME,
+  DEFAULT_IMAGE_WIDTH,
+  DEFAULT_IMAGE_HEIGHT
 } from '../constants';
+import { getScreenGuidelines, getDefaultTileSize } from '../utils/screenAreas';
+import { createEmptyTmxData, serializeTmxXml } from '../utils/tmxParser';
 
 interface NewFileModalProps {
   isOpen: boolean;
   onClose: () => void;
   projectPath: string;
   existingFiles: FileNode[];
+  platform: Platform;
+  pakTexts: string[];
   onFileCreated: (filePath: string, fileName: string) => void;
 }
 
@@ -23,6 +28,8 @@ export const NewFileModal: React.FC<NewFileModalProps> = ({
   onClose,
   projectPath,
   existingFiles,
+  platform,
+  pakTexts,
   onFileCreated
 }) => {
   const [selectedExtension, setSelectedExtension] = useState<string>(NEW_FILE_TYPES[0].extension);
@@ -61,6 +68,8 @@ export const NewFileModal: React.FC<NewFileModalProps> = ({
     setSelectedExtension(ext);
     if (ext === 'png') {
       setFileName(DEFAULT_NEW_PNG_NAME);
+    } else if (ext === 'tmx') {
+      setFileName(DEFAULT_NEW_TMX_NAME);
     } else {
       const lastDotIndex = fileName.lastIndexOf('.');
       if (lastDotIndex > 0) {
@@ -118,6 +127,16 @@ export const NewFileModal: React.FC<NewFileModalProps> = ({
         await invoke('write_file_base64', {
           filePath: fullPath,
           base64Data,
+        });
+      } else if (selectedExtension === 'tmx') {
+        const { tileWidth, tileHeight } = getDefaultTileSize(platform);
+        const { gameArea } = getScreenGuidelines(platform, pakTexts, tileWidth, tileHeight);
+        const tmxContent = serializeTmxXml(
+          createEmptyTmxData(gameArea.width, gameArea.height, tileWidth, tileHeight)
+        );
+        await invoke('write_text_file', {
+          filePath: fullPath,
+          content: tmxContent,
         });
       } else {
         await invoke('write_text_file', {

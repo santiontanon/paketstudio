@@ -1,32 +1,67 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { 
-  DoorOpen, 
-  Plus, 
-  Search, 
-  Code2, 
-  Save, 
-  Trash2, 
-  Check, 
-  AlertCircle, 
-  FileCode2, 
-  ExternalLink, 
+import {
+  DoorOpen,
+  Plus,
+  Search,
+  Code2,
+  Save,
+  Trash2,
+  Check,
+  AlertCircle,
+  AlertTriangle,
+  FileCode2,
+  ExternalLink,
   FileText,
+  Maximize2,
   X
 } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 import { safeInvoke as invoke } from '../utils/ipc';
 import type { PakRoom, PakObject, FileNode, TmxData, TmxObject, TmxLayer, TmxTileset, Platform } from '../types';
-import { parseTmxXml, serializeTmxXml, validateObjectIds, resolveExternalTilesets } from '../utils/tmxParser';
-import { getScreenGuidelines } from '../utils/screenAreas';
+import {
+  parseTmxXml,
+  serializeTmxXml,
+  validateObjectIds,
+  resolveExternalTilesets,
+  createEmptyTmxData,
+  resizeTmxData
+} from '../utils/tmxParser';
+import {
+  getScreenGuidelines,
+  getDefaultTileSize,
+  getMaxRoomOffset,
+  validateRoomDimensions,
+  isCpcPlatform
+} from '../utils/screenAreas';
 import { parentDir } from '../utils/paths';
 import { RoomCanvas } from './RoomCanvas';
-import { 
-  STORAGE_KEYS, 
-  DEFAULT_INSPECTOR_SIDEBAR_WIDTH, 
-  MIN_INSPECTOR_SIDEBAR_WIDTH, 
+import { ResizeRoomModal } from './ResizeRoomModal';
+import {
+  STORAGE_KEYS,
+  DEFAULT_INSPECTOR_SIDEBAR_WIDTH,
+  MIN_INSPECTOR_SIDEBAR_WIDTH,
   MAX_INSPECTOR_SIDEBAR_WIDTH,
-  DEFAULT_MAX_HISTORY_STEPS
+  DEFAULT_MAX_HISTORY_STEPS,
+  DEFAULT_NEW_TMX_NAME,
+  MIN_ROOM_SIZE
 } from '../constants';
+
+function findTmxFileNode(files: FileNode[], tmxFile: string, pakFilePath: string): FileNode | undefined {
+  const clean = tmxFile.trim().toLowerCase();
+  if (!clean) return undefined;
+  const pakDir = parentDir(pakFilePath).toLowerCase();
+  if (pakDir && !clean.includes('/')) {
+    const siblingPath = `${pakDir}/${clean}`;
+    const sibling = files.find(f => f.relative_path.toLowerCase() === siblingPath);
+    if (sibling) return sibling;
+  }
+  return files.find(f => f.relative_path.toLowerCase() === clean || f.name.toLowerCase() === clean);
+}
+
+function suggestTmxFileName(roomId: string): string {
+  const sanitized = roomId.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+  return sanitized ? `${sanitized}.tmx` : DEFAULT_NEW_TMX_NAME;
+}
 
 interface RoomInspectorProps {
   rooms: PakRoom[];
@@ -34,7 +69,7 @@ interface RoomInspectorProps {
   files: FileNode[];
   projectObjects: PakObject[];
   platform: Platform;
-  inMemoryPakFiles?: Record<string, { content: string; isDirty: boolean }>;
+  pakTexts: string[];
   onOpenCodeAtLine: (filePath: string, line: number) => void;
   onTransferToMemory: (relPath: string, updatedRoom: PakRoom, targetId: string) => Promise<void>;
   onDeleteRoomFromMemory: (relPath: string, targetId: string) => Promise<void>;
@@ -51,7 +86,7 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   files,
   projectObjects,
   platform,
-  inMemoryPakFiles,
+  pakTexts,
   onOpenCodeAtLine,
   onTransferToMemory,
   onDeleteRoomFromMemory,
@@ -102,8 +137,10 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   const [editSubroom, setEditSubroom] = useState(false);
   const [editRulesText, setEditRulesText] = useState('');
 
-  // Rules Editor Modal state
+  // Rules & Resize Modal state
   const [isRulesModalOpen, setIsRulesModalOpen] = useState(false);
+  const [isResizeModalOpen, setIsResizeModalOpen] = useState(false);
+  const [resizeNotice, setResizeNotice] = useState<string | null>(null);
 
   // TMX data for active room
   const [tmxData, setTmxData] = useState<TmxData | null>(null);
@@ -115,6 +152,8 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
   // Undo / Redo history
   const historyRef = useRef<Array<{
+    width: number;
+    height: number;
     objects: TmxObject[];
     layers: TmxLayer[];
     tilesets: TmxTileset[];
@@ -137,9 +176,14 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   // New Room Modal state
   const [isNewRoomModalOpen, setIsNewRoomModalOpen] = useState(false);
   const [newRoomId, setNewRoomId] = useState('');
+  const [newRoomTmxMode, setNewRoomTmxMode] = useState<'new' | 'existing'>('new');
   const [newRoomTmx, setNewRoomTmx] = useState('');
+  const [isNewRoomTmxManuallyEdited, setIsNewRoomTmxManuallyEdited] = useState(false);
+  const [newRoomWidth, setNewRoomWidth] = useState(16);
+  const [newRoomHeight, setNewRoomHeight] = useState(11);
   const [newRoomTargetFile, setNewRoomTargetFile] = useState('');
   const [newRoomSubroom, setNewRoomSubroom] = useState(false);
+  const [newRoomError, setNewRoomError] = useState<string | null>(null);
 
   // Pak and Tmx file lists in project
   const pakFiles = useMemo(() => {
@@ -158,8 +202,8 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   const filteredRooms = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
     if (!q) return rooms;
-    return rooms.filter(r => 
-      r.id.toLowerCase().includes(q) || 
+    return rooms.filter(r =>
+      r.id.toLowerCase().includes(q) ||
       r.tmxFile.toLowerCase().includes(q)
     );
   }, [rooms, searchQuery]);
@@ -173,25 +217,48 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   // Active TMX file node to get full path
   const activeTmxFileNode = useMemo(() => {
     if (!activeRoom || !activeRoom.tmxFile) return undefined;
-    const nameOnly = activeRoom.tmxFile.toLowerCase().trim();
-    return files.find(f => f.name.toLowerCase() === nameOnly || f.relative_path.toLowerCase() === nameOnly);
+    return findTmxFileNode(files, activeRoom.tmxFile, activeRoom.filePath);
   }, [activeRoom, files]);
 
+  // Project-level screen guidelines (using platform default tile size, for new room defaults)
+  const defaultTileSize = useMemo(() => getDefaultTileSize(platform), [platform]);
+  const projectScreenGuidelines = useMemo(
+    () => getScreenGuidelines(platform, pakTexts, defaultTileSize.tileWidth, defaultTileSize.tileHeight),
+    [platform, pakTexts, defaultTileSize.tileWidth, defaultTileSize.tileHeight]
+  );
+
   // Screen Guidelines computed for active room and platform
-  const screenGuidelines = useMemo(() => {
-    const pakTexts: string[] = [];
-    if (inMemoryPakFiles) {
-      for (const v of Object.values(inMemoryPakFiles)) {
-        pakTexts.push(v.content);
-      }
-    }
-    return getScreenGuidelines(
+  const screenGuidelines = useMemo(
+    () => getScreenGuidelines(
       platform,
       pakTexts,
-      tmxData?.tilewidth || 8,
-      tmxData?.tileheight || 8
+      tmxData?.tilewidth ?? defaultTileSize.tileWidth,
+      tmxData?.tileheight ?? defaultTileSize.tileHeight
+    ),
+    [platform, pakTexts, tmxData?.tilewidth, tmxData?.tileheight, defaultTileSize.tileWidth, defaultTileSize.tileHeight]
+  );
+
+  const { maxOffsetX, maxOffsetY } = useMemo(
+    () => getMaxRoomOffset(
+      screenGuidelines.gameArea.width,
+      screenGuidelines.gameArea.height,
+      tmxData ? tmxData.width : MIN_ROOM_SIZE,
+      tmxData ? tmxData.height : MIN_ROOM_SIZE
+    ),
+    [screenGuidelines.gameArea.width, screenGuidelines.gameArea.height, tmxData]
+  );
+
+  const roomBoundsWarning = useMemo(() => {
+    if (!tmxData) return null;
+    return validateRoomDimensions(
+      tmxData.width,
+      tmxData.height,
+      editX,
+      editY,
+      screenGuidelines.gameArea.width,
+      screenGuidelines.gameArea.height
     );
-  }, [platform, inMemoryPakFiles, tmxData?.tilewidth, tmxData?.tileheight]);
+  }, [tmxData, editX, editY, screenGuidelines.gameArea.width, screenGuidelines.gameArea.height]);
 
   // Load active room into form state
   useEffect(() => {
@@ -204,6 +271,7 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
       setEditRulesText(activeRoom.rules.join('\n'));
       setIsDirty(false);
       setErrorMessage(null);
+      setResizeNotice(null);
       setIsConfirmingDelete(false);
       setSelectedObjectId(null);
     }
@@ -217,8 +285,7 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
       return;
     }
 
-    const tmxFilename = activeRoom.tmxFile.trim().toLowerCase();
-    const matched = files.find(f => f.name.toLowerCase() === tmxFilename || f.relative_path.toLowerCase() === tmxFilename);
+    const matched = findTmxFileNode(files, activeRoom.tmxFile, activeRoom.filePath);
 
     if (!matched) {
       setTmxData(null);
@@ -241,6 +308,8 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
           setTmxError(tilesetErrors.length ? tilesetErrors.join('; ') : null);
           setIsTmxDirty(false);
           historyRef.current = [{
+            width: parsed.width,
+            height: parsed.height,
             objects: JSON.parse(JSON.stringify(parsed.objects)),
             layers: JSON.parse(JSON.stringify(parsed.layers)),
             tilesets: JSON.parse(JSON.stringify(parsed.tilesets)),
@@ -301,8 +370,7 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
     // Save TMX if modified
     if (isTmxDirty && tmxData) {
-      const tmxFilename = updatedRoom.tmxFile.trim().toLowerCase();
-      const matched = files.find(f => f.name.toLowerCase() === tmxFilename || f.relative_path.toLowerCase() === tmxFilename);
+      const matched = findTmxFileNode(files, updatedRoom.tmxFile, activeRoom.filePath);
       if (matched) {
         const xml = serializeTmxXml(tmxData);
         await invoke('write_text_file', { filePath: matched.path, content: xml });
@@ -357,6 +425,8 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
   const pushHistory = useCallback((
     snapshotData?: {
+      width?: number;
+      height?: number;
       objects?: TmxObject[];
       layers?: TmxLayer[];
       tilesets?: TmxTileset[];
@@ -365,6 +435,8 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   ) => {
     if (!tmxData) return;
     const snapshot = {
+      width: snapshotData?.width ?? tmxData.width,
+      height: snapshotData?.height ?? tmxData.height,
       objects: JSON.parse(JSON.stringify(snapshotData?.objects ?? tmxData.objects)) as TmxObject[],
       layers: JSON.parse(JSON.stringify(snapshotData?.layers ?? tmxData.layers)) as TmxLayer[],
       tilesets: JSON.parse(JSON.stringify(snapshotData?.tilesets ?? tmxData.tilesets)) as TmxTileset[],
@@ -388,11 +460,14 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
     setTmxData(prev => prev ? {
       ...prev,
+      width: target.width,
+      height: target.height,
       objects: JSON.parse(JSON.stringify(target.objects)),
       layers: JSON.parse(JSON.stringify(target.layers)),
       tilesets: JSON.parse(JSON.stringify(target.tilesets)),
     } : prev);
     setSelectedObjectId(target.selectedObjectId);
+    setResizeNotice(null);
     setIsTmxDirty(true);
     setIsDirty(true);
     updateUndoRedoState();
@@ -406,11 +481,14 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
     setTmxData(prev => prev ? {
       ...prev,
+      width: target.width,
+      height: target.height,
       objects: JSON.parse(JSON.stringify(target.objects)),
       layers: JSON.parse(JSON.stringify(target.layers)),
       tilesets: JSON.parse(JSON.stringify(target.tilesets)),
     } : prev);
     setSelectedObjectId(target.selectedObjectId);
+    setResizeNotice(null);
     setIsTmxDirty(true);
     setIsDirty(true);
     updateUndoRedoState();
@@ -430,12 +508,31 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
     setIsTmxDirty(true);
     setIsDirty(true);
     pushHistory({
+      width: updatedTmx.width,
+      height: updatedTmx.height,
       objects: updatedTmx.objects,
       layers: updatedTmx.layers,
       tilesets: updatedTmx.tilesets,
       selectedObjectId: newSelectedObjId !== undefined ? newSelectedObjId : selectedObjectId,
     });
   }, [pushHistory, selectedObjectId]);
+
+  const handleResizeRoom = useCallback((newWidth: number, newHeight: number) => {
+    if (!tmxData) return;
+    const { tmx: resized, clampedObjects } = resizeTmxData(
+      tmxData,
+      newWidth,
+      newHeight,
+      isCpcPlatform(platform)
+    );
+    handleCommitTmxSnapshot(resized, selectedObjectId);
+    if (clampedObjects.length > 0) {
+      const label = clampedObjects.length === 1 ? '1 object was' : `${clampedObjects.length} objects were`;
+      setResizeNotice(`${label} clamped inside the new ${newWidth}×${newHeight} room bounds. Press Cmd/Ctrl+Z to undo.`);
+    } else {
+      setResizeNotice(null);
+    }
+  }, [tmxData, platform, handleCommitTmxSnapshot, selectedObjectId]);
 
   // Keyboard shortcut Cmd+S to save, Cmd+Z to undo, Cmd+Shift+Z / Ctrl+Y to redo
   useEffect(() => {
@@ -543,14 +640,78 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
     pushHistory({ objects: nextObjects, selectedObjectId: newObj.id });
   }, [tmxData, pushHistory]);
 
+  // Live validation for Create New Room modal
+  const newRoomDimensionError = useMemo(() => {
+    if (newRoomTmxMode !== 'new') return null;
+    return validateRoomDimensions(
+      newRoomWidth,
+      newRoomHeight,
+      0,
+      0,
+      projectScreenGuidelines.gameArea.width,
+      projectScreenGuidelines.gameArea.height
+    );
+  }, [newRoomTmxMode, newRoomWidth, newRoomHeight, projectScreenGuidelines.gameArea.width, projectScreenGuidelines.gameArea.height]);
+
   // Create New Room
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
+    setNewRoomError(null);
+
     const trimmedId = newRoomId.trim();
-    if (!trimmedId) return;
+    if (!trimmedId) {
+      setNewRoomError('Room ID cannot be empty.');
+      return;
+    }
+
+    if (rooms.some(r => r.id === trimmedId)) {
+      setNewRoomError(`A room with ID "${trimmedId}" already exists.`);
+      return;
+    }
 
     const targetPak = newRoomTargetFile || pakFiles[0] || 'game.pak';
-    const chosenTmx = newRoomTmx || (tmxFiles[0] || 'room.tmx');
+    let chosenTmx = newRoomTmx.trim();
+    let defaultTmxXml: string | undefined = undefined;
+
+    if (newRoomTmxMode === 'new') {
+      if (!chosenTmx) {
+        setNewRoomError('Please enter a filename for the new .tmx map.');
+        return;
+      }
+      if (/[\\?%*:|"<>]/.test(chosenTmx)) {
+        setNewRoomError('TMX filename contains invalid characters.');
+        return;
+      }
+      if (!chosenTmx.toLowerCase().endsWith('.tmx')) {
+        chosenTmx = `${chosenTmx}.tmx`;
+      }
+      if (newRoomDimensionError) {
+        setNewRoomError(newRoomDimensionError);
+        return;
+      }
+
+      const pakDir = parentDir(targetPak);
+      const targetRelPath = pakDir && !chosenTmx.includes('/') ? `${pakDir}/${chosenTmx}` : chosenTmx;
+      const alreadyExists = files.some(
+        f => f.relative_path.toLowerCase() === targetRelPath.toLowerCase()
+      );
+      if (alreadyExists) {
+        setNewRoomError(`A file named "${targetRelPath}" already exists. Choose a different name or select "Use existing .tmx".`);
+        return;
+      }
+
+      defaultTmxXml = serializeTmxXml(
+        createEmptyTmxData(
+          newRoomWidth,
+          newRoomHeight,
+          defaultTileSize.tileWidth,
+          defaultTileSize.tileHeight
+        )
+      );
+    } else if (!chosenTmx) {
+      setNewRoomError('Please select an existing .tmx file.');
+      return;
+    }
 
     const newRoom: PakRoom = {
       id: trimmedId,
@@ -564,27 +725,17 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
       endLine: 0
     };
 
-    let defaultTmxXml: string | undefined = undefined;
-    const matched = files.find(f => f.name.toLowerCase() === chosenTmx.toLowerCase());
-    if (!matched) {
-      defaultTmxXml = `<?xml version="1.0" encoding="UTF-8"?>
-<map version="1.0" orientation="orthogonal" renderorder="right-down" width="32" height="11" tilewidth="8" tileheight="8" nextobjectid="2">
- <layer name="background" width="32" height="11">
-  <data encoding="csv">
-${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
-  </data>
- </layer>
- <objectgroup name="objects"/>
-</map>`;
-    }
-
     try {
+      if (isDirty || isTmxDirty) {
+        await transferCurrentRoomToMemory();
+      }
       await onCreateRoomInMemory(targetPak, newRoom, defaultTmxXml);
       setIsNewRoomModalOpen(false);
       setNewRoomId('');
+      setNewRoomError(null);
       setSelectedRoomKey(`${targetPak}:${trimmedId}`);
     } catch (err: any) {
-      setErrorMessage(err?.message || 'Failed to create room.');
+      setNewRoomError(err?.message || 'Failed to create room.');
     }
   };
 
@@ -601,9 +752,14 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
               className="btn btn-primary btn-sm"
               onClick={() => {
                 setNewRoomId('');
-                setNewRoomTmx(tmxFiles[0] || 'room.tmx');
+                setNewRoomTmxMode('new');
+                setNewRoomTmx(DEFAULT_NEW_TMX_NAME);
+                setIsNewRoomTmxManuallyEdited(false);
+                setNewRoomWidth(projectScreenGuidelines.gameArea.width);
+                setNewRoomHeight(projectScreenGuidelines.gameArea.height);
                 setNewRoomTargetFile(pakFiles[0] || 'game.pak');
                 setNewRoomSubroom(false);
+                setNewRoomError(null);
                 setIsNewRoomModalOpen(true);
               }}
               title="Declare a new room"
@@ -758,6 +914,45 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
               </div>
             )}
 
+            {roomBoundsWarning && (
+              <div
+                className="inspector-alert"
+                style={{
+                  background: 'rgba(245, 158, 11, 0.12)',
+                  borderColor: 'rgba(245, 158, 11, 0.4)',
+                  color: '#f59e0b',
+                }}
+              >
+                <AlertTriangle size={14} />
+                <span>Room exceeds game area: {roomBoundsWarning}</span>
+              </div>
+            )}
+
+            {resizeNotice && (
+              <div
+                className="inspector-alert"
+                style={{
+                  background: 'rgba(245, 158, 11, 0.12)',
+                  borderColor: 'rgba(245, 158, 11, 0.4)',
+                  color: '#f59e0b',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <AlertTriangle size={14} />
+                  <span>{resizeNotice}</span>
+                </div>
+                <button
+                  type="button"
+                  className="icon-action-btn"
+                  onClick={() => setResizeNotice(null)}
+                  title="Dismiss"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )}
+
             {/* Compact Top Properties Strip */}
             <div className="room-props-strip">
               <div className="room-prop-item">
@@ -811,8 +1006,16 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                   type="number"
                   className="text-input num-input"
                   style={{ width: '55px', padding: '3px 6px' }}
+                  min={0}
+                  max={maxOffsetX}
                   value={editX}
-                  onChange={e => { setEditX(parseInt(e.target.value, 10) || 0); handleFieldChange(); }}
+                  title={`Tile offset X (0–${maxOffsetX} to stay within ${screenGuidelines.gameArea.width}-tile game area)`}
+                  onChange={e => {
+                    const parsed = parseInt(e.target.value, 10);
+                    const clamped = Math.max(0, Math.min(maxOffsetX, isNaN(parsed) ? 0 : parsed));
+                    setEditX(clamped);
+                    handleFieldChange();
+                  }}
                 />
               </div>
 
@@ -822,10 +1025,37 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                   type="number"
                   className="text-input num-input"
                   style={{ width: '55px', padding: '3px 6px' }}
+                  min={0}
+                  max={maxOffsetY}
                   value={editY}
-                  onChange={e => { setEditY(parseInt(e.target.value, 10) || 0); handleFieldChange(); }}
+                  title={`Tile offset Y (0–${maxOffsetY} to stay within ${screenGuidelines.gameArea.height}-tile game area)`}
+                  onChange={e => {
+                    const parsed = parseInt(e.target.value, 10);
+                    const clamped = Math.max(0, Math.min(maxOffsetY, isNaN(parsed) ? 0 : parsed));
+                    setEditY(clamped);
+                    handleFieldChange();
+                  }}
                 />
               </div>
+
+              {tmxData && (
+                <div className="room-prop-item">
+                  <label>Size:</label>
+                  <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-main)' }}>
+                    {tmxData.width}×{tmxData.height}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    style={{ padding: '2px 7px', fontSize: '11px' }}
+                    onClick={() => setIsResizeModalOpen(true)}
+                    title={`Resize room dimensions (max ${screenGuidelines.gameArea.width}×${screenGuidelines.gameArea.height} tiles for game area)`}
+                  >
+                    <Maximize2 size={11} />
+                    <span>Resize...</span>
+                  </button>
+                </div>
+              )}
 
               <div className="room-prop-item">
                 <label className="checkbox-label" style={{ fontSize: '11px', gap: '4px' }}>
@@ -851,6 +1081,8 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                 files={files}
                 platform={platform}
                 screenGuidelines={screenGuidelines}
+                roomOffsetX={editX}
+                roomOffsetY={editY}
                 onUpdateObject={handleUpdateObject}
                 onDeleteObject={handleDeleteObject}
                 onAddObject={handleAddObject}
@@ -928,6 +1160,20 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
         </div>
       )}
 
+      {/* Resize Room Modal */}
+      {tmxData && (
+        <ResizeRoomModal
+          isOpen={isResizeModalOpen}
+          onClose={() => setIsResizeModalOpen(false)}
+          tmxData={tmxData}
+          offsetX={editX}
+          offsetY={editY}
+          gameAreaWidth={screenGuidelines.gameArea.width}
+          gameAreaHeight={screenGuidelines.gameArea.height}
+          onResize={handleResizeRoom}
+        />
+      )}
+
       {/* New Room Modal */}
       {isNewRoomModalOpen && (
         <div className="modal-overlay" onClick={() => setIsNewRoomModalOpen(false)}>
@@ -937,16 +1183,38 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                 <DoorOpen size={18} className="modal-icon" />
                 <span className="modal-title">Create New Room</span>
               </div>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setIsNewRoomModalOpen(false)}
+                aria-label="Close dialog"
+              >
+                <X size={16} />
+              </button>
             </div>
             <form onSubmit={handleCreateRoom}>
               <div className="modal-body">
+                {(newRoomError || newRoomDimensionError) && (
+                  <div className="inspector-alert error" style={{ marginBottom: '12px' }}>
+                    <AlertCircle size={14} style={{ flexShrink: 0 }} />
+                    <span>{newRoomError || newRoomDimensionError}</span>
+                  </div>
+                )}
+
                 <div className="form-group">
                   <label>Room ID:</label>
                   <input
                     type="text"
                     className="text-input"
                     value={newRoomId}
-                    onChange={e => setNewRoomId(e.target.value)}
+                    onChange={e => {
+                      const nextId = e.target.value;
+                      setNewRoomId(nextId);
+                      setNewRoomError(null);
+                      if (newRoomTmxMode === 'new' && !isNewRoomTmxManuallyEdited) {
+                        setNewRoomTmx(suggestTmxFileName(nextId));
+                      }
+                    }}
                     placeholder="e.g. kitchen"
                     autoFocus
                   />
@@ -955,11 +1223,41 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
 
                 <div className="form-group">
                   <label>TMX Map File:</label>
-                  {tmxFiles.length > 0 ? (
+                  {tmxFiles.length > 0 && (
+                    <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                      <button
+                        type="button"
+                        className={`btn-toolbar-toggle ${newRoomTmxMode === 'new' ? 'active' : ''}`}
+                        style={{ flex: 1, padding: '4px 8px' }}
+                        onClick={() => {
+                          setNewRoomTmxMode('new');
+                          setNewRoomTmx(suggestTmxFileName(newRoomId));
+                          setIsNewRoomTmxManuallyEdited(false);
+                          setNewRoomError(null);
+                        }}
+                      >
+                        Create new .tmx
+                      </button>
+                      <button
+                        type="button"
+                        className={`btn-toolbar-toggle ${newRoomTmxMode === 'existing' ? 'active' : ''}`}
+                        style={{ flex: 1, padding: '4px 8px' }}
+                        onClick={() => {
+                          setNewRoomTmxMode('existing');
+                          setNewRoomTmx(tmxFiles[0] || '');
+                          setNewRoomError(null);
+                        }}
+                      >
+                        Use existing .tmx
+                      </button>
+                    </div>
+                  )}
+
+                  {newRoomTmxMode === 'existing' && tmxFiles.length > 0 ? (
                     <select
                       className="select-input"
                       value={newRoomTmx}
-                      onChange={e => setNewRoomTmx(e.target.value)}
+                      onChange={e => { setNewRoomTmx(e.target.value); setNewRoomError(null); }}
                     >
                       {tmxFiles.map(f => (
                         <option key={f} value={f}>{f}</option>
@@ -970,11 +1268,56 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                       type="text"
                       className="text-input"
                       value={newRoomTmx}
-                      onChange={e => setNewRoomTmx(e.target.value)}
-                      placeholder="room.tmx"
+                      onChange={e => {
+                        setNewRoomTmx(e.target.value);
+                        setIsNewRoomTmxManuallyEdited(true);
+                        setNewRoomError(null);
+                      }}
+                      placeholder="kitchen.tmx"
                     />
                   )}
                 </div>
+
+                {newRoomTmxMode === 'new' && (
+                  <div className="form-group-card">
+                    <div className="form-row-2col">
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label>Width (tiles):</label>
+                        <input
+                          type="number"
+                          className="text-input num-input"
+                          min={MIN_ROOM_SIZE}
+                          max={projectScreenGuidelines.gameArea.width}
+                          value={newRoomWidth}
+                          onChange={e => {
+                            setNewRoomWidth(parseInt(e.target.value, 10) || 0);
+                            setNewRoomError(null);
+                          }}
+                        />
+                        <span className="form-hint">
+                          Max {projectScreenGuidelines.gameArea.width} ({Math.max(0, newRoomWidth) * defaultTileSize.tileWidth} px)
+                        </span>
+                      </div>
+                      <div className="form-group" style={{ marginBottom: 0 }}>
+                        <label>Height (tiles):</label>
+                        <input
+                          type="number"
+                          className="text-input num-input"
+                          min={MIN_ROOM_SIZE}
+                          max={projectScreenGuidelines.gameArea.height}
+                          value={newRoomHeight}
+                          onChange={e => {
+                            setNewRoomHeight(parseInt(e.target.value, 10) || 0);
+                            setNewRoomError(null);
+                          }}
+                        />
+                        <span className="form-hint">
+                          Max {projectScreenGuidelines.gameArea.height} ({Math.max(0, newRoomHeight) * defaultTileSize.tileHeight} px)
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div className="form-group">
                   <label>Target .pak Script File:</label>
@@ -1011,7 +1354,7 @@ ${Array(11).fill(Array(32).fill(0).join(',')).join(',\n')}
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={!newRoomId.trim()}
+                  disabled={!newRoomId.trim() || !newRoomTmx.trim() || Boolean(newRoomDimensionError)}
                 >
                   Create Room
                 </button>

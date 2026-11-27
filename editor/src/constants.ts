@@ -78,7 +78,10 @@ export const BINARY_EXTENSIONS = new Set(['png', 'bmp', 'jpg', 'gif', 'bin', 'ds
 
 export const DEFAULT_NEW_PAK_NAME = 'new_script.pak';
 export const DEFAULT_NEW_PNG_NAME = 'sprites.png';
+export const DEFAULT_NEW_TMX_NAME = 'room.tmx';
 export const DEFAULT_PAK_CONTENT = '; PAKET Script\n\n';
+export const DEFAULT_BACKGROUND_LAYER_NAME = 'background';
+export const MIN_ROOM_SIZE = 1;
 
 export const DEFAULT_IMAGE_WIDTH = 128;
 export const DEFAULT_IMAGE_HEIGHT = 128;
