@@ -266,7 +266,10 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     }
   }, [zoom, showGrid, gridW, gridH, showPaletteHighlight, paletteCheckResult]);
 
-  // Load the image from disk via base64
+  const renderDisplayCanvasRef = useRef(renderDisplayCanvas);
+  renderDisplayCanvasRef.current = renderDisplayCanvas;
+
+  // Load the image from disk via base64 (only when filePath changes)
   useEffect(() => {
     let isCancelled = false;
     setIsLoading(true);
@@ -308,7 +311,7 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
           updateUndoRedoState();
 
           setIsLoading(false);
-          renderDisplayCanvas();
+          renderDisplayCanvasRef.current();
         };
 
         img.onerror = () => {
@@ -331,7 +334,7 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     return () => {
       isCancelled = true;
     };
-  }, [filePath, renderDisplayCanvas, updateUndoRedoState]);
+  }, [filePath, updateUndoRedoState]);
 
   // Re-render when zoom or grid changes
   useEffect(() => {
