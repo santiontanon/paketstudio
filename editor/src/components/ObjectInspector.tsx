@@ -39,6 +39,7 @@ interface ObjectInspectorProps {
   hasUnsavedChanges: boolean;
   onOpenImageFile?: (fileName: string) => void;
   onRegisterSaveHandler?: (handler: () => Promise<void>) => void;
+  onRegisterFlushHandler?: (handler: () => Promise<void>) => void;
 }
 
 const COMMON_STATES = ['idle', 'walking-1', 'walking-2', 'walking-3', 'walking-4', 'open', 'closed', 'exit', 'hidden'];
@@ -55,7 +56,8 @@ export const ObjectInspector: React.FC<ObjectInspectorProps> = ({
   onSaveAll,
   hasUnsavedChanges,
   onOpenImageFile,
-  onRegisterSaveHandler
+  onRegisterSaveHandler,
+  onRegisterFlushHandler
 }) => {
   const [selectedObjectKey, setSelectedObjectKey] = useState<string | null>(() => {
     return objects.length > 0 ? `${objects[0].filePath}:${objects[0].id}` : null;
@@ -399,6 +401,18 @@ export const ObjectInspector: React.FC<ObjectInspectorProps> = ({
     }
   }, [onRegisterSaveHandler, handleSaveObject]);
 
+  const handleFlushObject = useCallback(async () => {
+    if (isDirty) {
+      await flushCurrentObjectToMemory();
+    }
+  }, [isDirty, flushCurrentObjectToMemory]);
+
+  useEffect(() => {
+    if (onRegisterFlushHandler) {
+      onRegisterFlushHandler(handleFlushObject);
+    }
+  }, [onRegisterFlushHandler, handleFlushObject]);
+
   // Keyboard shortcut Cmd+S to save, Cmd+Z to undo, Cmd+Shift+Z / Ctrl+Y to redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -487,6 +501,9 @@ export const ObjectInspector: React.FC<ObjectInspectorProps> = ({
     };
 
     try {
+      if (isDirty) {
+        await flushCurrentObjectToMemory();
+      }
       await onCreateObjectInMemory(newTargetFile, newObj);
       setIsNewModalOpen(false);
       loadedObjectKeyRef.current = null;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   X, 
   RotateCcw, 
@@ -59,6 +59,7 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
 
   const [undoStack, setUndoStack] = useState<PaletteHistoryState[]>([]);
   const [redoStack, setRedoStack] = useState<PaletteHistoryState[]>([]);
+  const sliderUndoSavedRef = useRef<boolean>(false);
 
   // Re-sync when modal opens
   useEffect(() => {
@@ -129,13 +130,15 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
   }, [isOpen, handleUndo, handleRedo, onClose]);
 
   // Color modification
-  const updateActiveColorRgb = (r: number, g: number, b: number) => {
+  const updateActiveColorRgb = (r: number, g: number, b: number, recordUndo: boolean) => {
     const clampedR = Math.max(0, Math.min(255, Math.round(r)));
     const clampedG = Math.max(0, Math.min(255, Math.round(g)));
     const clampedB = Math.max(0, Math.min(255, Math.round(b)));
     const hex = rgbToHex(clampedR, clampedG, clampedB);
 
-    pushUndo(currentColors, currentTolerance);
+    if (recordUndo) {
+      pushUndo(currentColors, currentTolerance);
+    }
 
     setCurrentColors(prev => {
       const next = clonePalette(prev);
@@ -152,10 +155,16 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
     });
   };
 
+  const handleSliderRgbChange = (r: number, g: number, b: number) => {
+    const shouldRecord = !sliderUndoSavedRef.current;
+    sliderUndoSavedRef.current = true;
+    updateActiveColorRgb(r, g, b, shouldRecord);
+  };
+
   const handleHexChange = (newHex: string) => {
     const parsed = hexToRgb(newHex);
     if (parsed) {
-      updateActiveColorRgb(parsed.r, parsed.g, parsed.b);
+      updateActiveColorRgb(parsed.r, parsed.g, parsed.b, true);
     }
   };
 
@@ -408,7 +417,8 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
                         min={0} 
                         max={255} 
                         value={activeColor.r}
-                        onChange={e => updateActiveColorRgb(parseInt(e.target.value, 10) || 0, activeColor.g, activeColor.b)}
+                        onPointerDown={() => { sliderUndoSavedRef.current = false; }}
+                        onChange={e => handleSliderRgbChange(parseInt(e.target.value, 10) || 0, activeColor.g, activeColor.b)}
                         style={{ flex: 1, accentColor: '#f87171', height: '4px' }}
                       />
                       <input 
@@ -417,7 +427,7 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
                         max={255} 
                         className="text-input"
                         value={activeColor.r}
-                        onChange={e => updateActiveColorRgb(parseInt(e.target.value, 10) || 0, activeColor.g, activeColor.b)}
+                        onChange={e => updateActiveColorRgb(parseInt(e.target.value, 10) || 0, activeColor.g, activeColor.b, true)}
                         style={{ width: '50px', padding: '1px 4px', fontSize: '11px', textAlign: 'right' }}
                       />
                     </div>
@@ -430,7 +440,8 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
                         min={0} 
                         max={255} 
                         value={activeColor.g}
-                        onChange={e => updateActiveColorRgb(activeColor.r, parseInt(e.target.value, 10) || 0, activeColor.b)}
+                        onPointerDown={() => { sliderUndoSavedRef.current = false; }}
+                        onChange={e => handleSliderRgbChange(activeColor.r, parseInt(e.target.value, 10) || 0, activeColor.b)}
                         style={{ flex: 1, accentColor: '#4ade80', height: '4px' }}
                       />
                       <input 
@@ -439,7 +450,7 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
                         max={255} 
                         className="text-input"
                         value={activeColor.g}
-                        onChange={e => updateActiveColorRgb(activeColor.r, parseInt(e.target.value, 10) || 0, activeColor.b)}
+                        onChange={e => updateActiveColorRgb(activeColor.r, parseInt(e.target.value, 10) || 0, activeColor.b, true)}
                         style={{ width: '50px', padding: '1px 4px', fontSize: '11px', textAlign: 'right' }}
                       />
                     </div>
@@ -452,7 +463,8 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
                         min={0} 
                         max={255} 
                         value={activeColor.b}
-                        onChange={e => updateActiveColorRgb(activeColor.r, activeColor.g, parseInt(e.target.value, 10) || 0)}
+                        onPointerDown={() => { sliderUndoSavedRef.current = false; }}
+                        onChange={e => handleSliderRgbChange(activeColor.r, activeColor.g, parseInt(e.target.value, 10) || 0)}
                         style={{ flex: 1, accentColor: '#60a5fa', height: '4px' }}
                       />
                       <input 
@@ -461,7 +473,7 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
                         max={255} 
                         className="text-input"
                         value={activeColor.b}
-                        onChange={e => updateActiveColorRgb(activeColor.r, activeColor.g, parseInt(e.target.value, 10) || 0)}
+                        onChange={e => updateActiveColorRgb(activeColor.r, activeColor.g, parseInt(e.target.value, 10) || 0, true)}
                         style={{ width: '50px', padding: '1px 4px', fontSize: '11px', textAlign: 'right' }}
                       />
                     </div>

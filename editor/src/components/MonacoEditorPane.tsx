@@ -15,7 +15,7 @@ interface MonacoEditorPaneProps {
   tolerance?: number;
   onOpenPaletteManager?: () => void;
   onLogToConsole?: (msg: string) => void;
-  onContentChange: (newContent: string) => void;
+  onContentChange: (newContent: string, isDirty: boolean) => void;
   onSave: () => void;
   onCompile: () => void;
   onNewProject?: () => void;
@@ -148,15 +148,17 @@ export const MonacoEditorPane: React.FC<MonacoEditorPaneProps> = ({
         filePath={activeTab.filePath}
         title={activeTab.title}
         platform={platform}
+        initialDataUrl={activeTab.isDirty && activeTab.content ? activeTab.content : undefined}
+        isTabDirty={activeTab.isDirty}
         palette={palette}
         tolerance={tolerance}
         onOpenPaletteManager={onOpenPaletteManager}
         onLogToConsole={onLogToConsole}
-        onDirtyChange={(_dirty, currentContent) => {
-          onContentChange(currentContent);
+        onDirtyChange={(dirty, currentContent) => {
+          onContentChange(currentContent, dirty);
         }}
         onSave={async () => {
-          onSave();
+          await onSave();
         }}
       />
     );
@@ -191,7 +193,7 @@ export const MonacoEditorPane: React.FC<MonacoEditorPaneProps> = ({
           value={activeTab.content}
           beforeMount={handleEditorWillMount}
           onMount={handleEditorDidMount}
-          onChange={(val) => onContentChange(val || '')}
+          onChange={(val) => onContentChange(val || '', true)}
           options={{
             fontSize: 14,
             fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, monospace",

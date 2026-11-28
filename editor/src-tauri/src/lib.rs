@@ -80,7 +80,7 @@ pub struct SystemInfo {
     pub default_project_dir: Option<String>,
 }
 
-fn detect_java(custom_path: Option<&str>) -> Option<String> {
+fn detect_java(custom_path: Option<&str>, resource_dir: Option<&Path>) -> Option<String> {
     if let Some(p) = custom_path {
         let trimmed = p.trim();
         if !trimmed.is_empty() && Path::new(trimmed).exists() {
@@ -88,7 +88,19 @@ fn detect_java(custom_path: Option<&str>) -> Option<String> {
         }
     }
 
-    // Check bundled minimal JRE first
+    // Check Tauri's bundled resource directory first (works across macOS, Windows, and Linux .deb/.rpm)
+    if let Some(res_dir) = resource_dir {
+        for rel in ["jre/bin/java", "jre/bin/java.exe"] {
+            let candidate = res_dir.join(rel);
+            if let Ok(canonical) = candidate.canonicalize() {
+                if canonical.is_file() {
+                    return Some(canonical.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    // Check bundled minimal JRE relative to executable
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             for rel in BUNDLED_JAVA_PATHS {
@@ -153,7 +165,11 @@ fn detect_java(custom_path: Option<&str>) -> Option<String> {
     None
 }
 
-fn detect_paket_jar(custom_path: Option<&str>, project_dir: Option<&str>) -> Option<String> {
+fn detect_paket_jar(
+    custom_path: Option<&str>,
+    project_dir: Option<&str>,
+    resource_dir: Option<&Path>,
+) -> Option<String> {
     if let Some(p) = custom_path {
         let trimmed = p.trim();
         if !trimmed.is_empty() && Path::new(trimmed).exists() {
@@ -169,6 +185,10 @@ fn detect_paket_jar(custom_path: Option<&str>, project_dir: Option<&str>) -> Opt
         candidates.push(base_path.join("../PAKET.jar"));
         candidates.push(base_path.join("../../PAKET.jar"));
         candidates.push(base_path.join("../../../PAKET.jar"));
+    }
+
+    if let Some(res_dir) = resource_dir {
+        candidates.push(res_dir.join("PAKET.jar"));
     }
 
     if let Ok(exe) = std::env::current_exe() {
@@ -219,9 +239,15 @@ fn detect_paket_jar_version(java_bin: Option<&str>, jar_path: Option<&str>) -> O
 }
 
 #[tauri::command]
-fn get_system_info(project_dir: Option<String>, custom_java: Option<String>, custom_jar: Option<String>) -> SystemInfo {
-    let java = detect_java(custom_java.as_deref());
-    let jar = detect_paket_jar(custom_jar.as_deref(), project_dir.as_deref());
+fn get_system_info(
+    app: tauri::AppHandle,
+    project_dir: Option<String>,
+    custom_java: Option<String>,
+    custom_jar: Option<String>,
+) -> SystemInfo {
+    let resource_dir = app.path().resource_dir().ok();
+    let java = detect_java(custom_java.as_deref(), resource_dir.as_deref());
+    let jar = detect_paket_jar(custom_jar.as_deref(), project_dir.as_deref(), resource_dir.as_deref());
     let jar_version = detect_paket_jar_version(java.as_deref(), jar.as_deref());
     let default_dir = std::env::current_dir().ok().map(|d| {
         let s = d.to_string_lossy().to_string();
@@ -282,20 +308,35 @@ fn pick_folder() -> Result<Option<String>, String> {
 
     #[cfg(target_os = "linux")]
     {
-        let output = Command::new("zenity")
+        if let Ok(out) = Command::new("zenity")
             .arg("--file-selection")
             .arg("--directory")
-            .output();
-
-        if let Ok(out) = output {
+            .output()
+        {
             if out.status.success() {
                 let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !path_str.is_empty() {
                     return Ok(Some(path_str));
                 }
             }
+            return Ok(None);
         }
-        Ok(None)
+
+        if let Ok(out) = Command::new("kdialog")
+            .arg("--getexistingdirectory")
+            .arg(".")
+            .output()
+        {
+            if out.status.success() {
+                let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !path_str.is_empty() {
+                    return Ok(Some(path_str));
+                }
+            }
+            return Ok(None);
+        }
+
+        Err("No folder picker dialog available. Please install zenity or kdialog.".to_string())
     }
 }
 
@@ -612,13 +653,12 @@ fn parse_compiler_errors(output: &str) -> Vec<CompilerProblem> {
             let err_content = trimmed.trim_start_matches("ERROR:").trim();
 
             // Matches e.g. "Unexpected token invalid_command in /path/to/file.pak line 1"
-            if let Some(in_idx) = err_content.find(" in ") {
-                let msg = err_content[..in_idx].trim().to_string();
-                let remainder = &err_content[in_idx + 4..];
-
-                if let Some(line_idx) = remainder.rfind(" line ") {
-                    let file_part = remainder[..line_idx].trim().to_string();
-                    let line_str = remainder[line_idx + 6..].trim();
+            if let Some(line_idx) = err_content.rfind(" line ") {
+                let before_line = &err_content[..line_idx];
+                if let Some(in_idx) = before_line.rfind(" in ") {
+                    let msg = before_line[..in_idx].trim().to_string();
+                    let file_part = before_line[in_idx + 4..].trim().to_string();
+                    let line_str = err_content[line_idx + 6..].trim();
                     let line_num = line_str.parse::<usize>().ok();
 
                     problems.push(CompilerProblem {
@@ -663,6 +703,7 @@ fn kill_compile(state: tauri::State<'_, ActiveCompiler>) -> Result<(), String> {
 
 #[tauri::command]
 async fn compile_game(
+    app: tauri::AppHandle,
     state: tauri::State<'_, ActiveCompiler>,
     on_output: tauri::ipc::Channel<String>,
     project_dir: String,
@@ -675,6 +716,7 @@ async fn compile_game(
     jar_path: Option<String>,
 ) -> Result<CompileResponse, String> {
     let active_compiler = state.inner().clone();
+    let resource_dir = app.path().resource_dir().ok();
 
     tauri::async_runtime::spawn_blocking(move || {
         // Kill previous compiler if still running
@@ -686,10 +728,10 @@ async fn compile_game(
             }
         }
 
-    let java_bin = detect_java(java_path.as_deref())
+    let java_bin = detect_java(java_path.as_deref(), resource_dir.as_deref())
         .ok_or_else(|| "No Java binary found. PAKET requires Java 18+. Please configure the Java path in Settings.".to_string())?;
 
-    let jar = detect_paket_jar(jar_path.as_deref(), Some(&project_dir))
+    let jar = detect_paket_jar(jar_path.as_deref(), Some(&project_dir), resource_dir.as_deref())
         .ok_or_else(|| "Could not find PAKET.jar. Please specify the path in Settings.".to_string())?;
 
     let proj_path = Path::new(&project_dir);

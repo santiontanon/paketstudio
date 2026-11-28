@@ -109,6 +109,7 @@ const loadProjectSettings = (projPath: string, currentGlobal: ProjectSettings): 
     outputDirRelative: '',
     emulatorCommand: DEFAULT_EMULATOR_COMMAND,
     compilerArgs: DEFAULT_COMPILER_ARGS,
+    targetFormat: undefined,
   };
 };
 
@@ -127,6 +128,14 @@ export const App: React.FC = () => {
   const [projectRooms, setProjectRooms] = useState<PakRoom[]>([]);
   const [diskPakContents, setDiskPakContents] = useState<Record<string, string>>({});
   const [inMemoryPakFiles, setInMemoryPakFiles] = useState<PakCopies>({});
+  const inMemoryPakFilesRef = useRef<PakCopies>(inMemoryPakFiles);
+  inMemoryPakFilesRef.current = inMemoryPakFiles;
+
+  const updateInMemoryPakFiles = useCallback((updater: PakCopies | ((prev: PakCopies) => PakCopies)) => {
+    const next = typeof updater === 'function' ? updater(inMemoryPakFilesRef.current) : updater;
+    inMemoryPakFilesRef.current = next;
+    setInMemoryPakFiles(next);
+  }, []);
 
   const [consoleOutput, setConsoleOutput] = useState<string>('');
   const [problems, setProblems] = useState<CompilerProblem[]>([]);
@@ -290,7 +299,7 @@ export const App: React.FC = () => {
       setProjectPath(cleanDirPath);
       localStorage.setItem(STORAGE_KEYS.LAST_PROJECT_PATH, cleanDirPath);
       setFiles(fileList);
-      setInMemoryPakFiles({});
+      updateInMemoryPakFiles({});
       setTabs([]);
       setActiveTabId(null);
       setProblems([]);
@@ -367,6 +376,7 @@ export const App: React.FC = () => {
         outputDirRelative: settings.outputDirRelative,
         emulatorCommand: settings.emulatorCommand,
         compilerArgs: settings.compilerArgs,
+        targetFormat: settings.targetFormat,
       };
       localStorage.setItem(
         `${STORAGE_KEYS.PROJECT_SETTINGS_PREFIX}${projectPath}`,
@@ -391,7 +401,7 @@ export const App: React.FC = () => {
     try {
       const fileList = await invoke<FileNode[]>('list_project_files', { projectPath: dir });
       setFiles(fileList);
-      setInMemoryPakFiles({});
+      updateInMemoryPakFiles({});
       await reloadProjectInspectors(fileList);
 
       // Auto-select main pak file if not selected
@@ -411,7 +421,7 @@ export const App: React.FC = () => {
     } catch (err) {
       console.error('Failed to list files:', err);
     }
-  }, []);
+  }, [reloadProjectInspectors, updateInMemoryPakFiles]);
 
   // Open Folder handler
   const handleOpenFolder = async () => {
@@ -467,7 +477,7 @@ export const App: React.FC = () => {
     setProjectObjects([]);
     setProjectRooms([]);
     setDiskPakContents({});
-    setInMemoryPakFiles({});
+    updateInMemoryPakFiles({});
     setConsoleOutput('Project closed.\n');
     setSettings(prev => ({ ...prev, mainPakRelative: '' }));
   };
@@ -582,7 +592,7 @@ export const App: React.FC = () => {
     });
 
     // Update in-memory pak files if present
-    setInMemoryPakFiles(prev => {
+    updateInMemoryPakFiles(prev => {
       const next = { ...prev };
       let changed = false;
       for (const [key, data] of Object.entries(prev)) {
@@ -643,7 +653,7 @@ export const App: React.FC = () => {
     });
 
     // Remove from inMemoryPakFiles
-    setInMemoryPakFiles(prev => {
+    updateInMemoryPakFiles(prev => {
       const next = { ...prev };
       let changed = false;
       for (const key of Object.keys(prev)) {
@@ -666,6 +676,13 @@ export const App: React.FC = () => {
 
   // Open a file into a tab
   const handleFileSelect = async (file: FileNode) => {
+    try {
+      await flushActiveInspectorIfNeeded();
+    } catch (err) {
+      console.error('Failed to flush active inspector:', err);
+      return;
+    }
+
     // Check if already open
     const existing = tabs.find(t => isSamePath(t.filePath, file.path) || isSamePath(t.id, file.path));
     if (existing) {
@@ -706,8 +723,11 @@ export const App: React.FC = () => {
   };
 
   // Open Item Inspector tab
-  const handleOpenItemInspector = () => {
+  const handleOpenItemInspector = async () => {
     const tabId = 'special:items';
+    if (activeTabIdRef.current !== tabId) {
+      try { await flushActiveInspectorIfNeeded(); } catch { return; }
+    }
     const existing = tabs.find(t => t.id === tabId);
     if (existing) {
       setActiveTabId(tabId);
@@ -727,8 +747,11 @@ export const App: React.FC = () => {
   };
 
   // Open Object Inspector tab
-  const handleOpenObjectInspector = () => {
+  const handleOpenObjectInspector = async () => {
     const tabId = 'special:objects';
+    if (activeTabIdRef.current !== tabId) {
+      try { await flushActiveInspectorIfNeeded(); } catch { return; }
+    }
     const existing = tabs.find(t => t.id === tabId);
     if (existing) {
       setActiveTabId(tabId);
@@ -748,8 +771,11 @@ export const App: React.FC = () => {
   };
 
   // Open Room Inspector tab
-  const handleOpenRoomInspector = () => {
+  const handleOpenRoomInspector = async () => {
     const tabId = 'special:rooms';
+    if (activeTabIdRef.current !== tabId) {
+      try { await flushActiveInspectorIfNeeded(); } catch { return; }
+    }
     const existing = tabs.find(t => t.id === tabId);
     if (existing) {
       setActiveTabId(tabId);
@@ -771,6 +797,7 @@ export const App: React.FC = () => {
   // Jump from inspector to line in code editor
   const handleOpenCodeAtLine = async (relPath: string, line: number) => {
     if (!projectPath) return;
+    try { await flushActiveInspectorIfNeeded(); } catch { return; }
     const fullPath = isAbsolutePath(relPath) ? relPath : `${projectPath}/${relPath}`;
     const title = relPath.split(/[/\\]/).pop() || relPath;
 
@@ -806,15 +833,19 @@ export const App: React.FC = () => {
   };
 
   // Tab content change
-  const handleContentChange = (newContent: string) => {
-    setTabs(prev => prev.map(tab => {
-      if (tab.id === activeTabId) {
-        return { ...tab, content: newContent, isDirty: true };
-      }
-      return tab;
-    }));
+  const handleContentChange = (newContent: string, isDirty: boolean) => {
+    setTabs(prev => {
+      const next = prev.map(tab => {
+        if (tab.id === activeTabId) {
+          return { ...tab, content: newContent, isDirty };
+        }
+        return tab;
+      });
+      tabsRef.current = next;
+      return next;
+    });
 
-    const currentTab = tabs.find(t => t.id === activeTabId);
+    const currentTab = tabsRef.current.find(t => t.id === activeTabId);
     if (currentTab && currentTab.filePath.toLowerCase().endsWith('.pak')) {
       const parsedPal = parseCustomPaletteFromContent(newContent, settings.selectedPlatform);
       if (parsedPal) {
@@ -844,30 +875,34 @@ export const App: React.FC = () => {
   // Read the newest text of a .pak file: its open tab, else the panels' copy, else the file on disk
   const getPakContentInMemory = useCallback(async (relPath: string): Promise<string> => {
     if (!projectPath) return '';
-    const inEditor = latestPakContent(relPath, inMemoryPakFiles, tabs, projectPath);
+    const inEditor = latestPakContent(relPath, inMemoryPakFilesRef.current, tabsRef.current, projectPath);
     if (inEditor !== undefined) {
       return inEditor;
     }
     const fullPath = isAbsolutePath(relPath) ? relPath : `${projectPath}/${relPath}`;
     return await invoke<string>('read_text_file', { filePath: fullPath });
-  }, [inMemoryPakFiles, tabs, projectPath]);
+  }, [projectPath]);
 
   const syncPakEditToState = useCallback((relPath: string, newContent: string, specialTabId: string) => {
     if (!projectPath) return;
-    setInMemoryPakFiles(prev => ({
+    updateInMemoryPakFiles(prev => ({
       ...prev,
       [relPath]: { content: newContent, isDirty: true }
     }));
-    setTabs(prev => prev.map(t => {
-      if (isSameProjectFile(t.filePath, relPath, projectPath)) {
-        return { ...t, content: newContent, isDirty: true };
-      }
-      if (t.id === specialTabId) {
-        return { ...t, isDirty: true };
-      }
-      return t;
-    }));
-  }, [projectPath]);
+    setTabs(prev => {
+      const next = prev.map(t => {
+        if (isSameProjectFile(t.filePath, relPath, projectPath)) {
+          return { ...t, content: newContent, isDirty: true };
+        }
+        if (t.id === specialTabId) {
+          return { ...t, isDirty: true };
+        }
+        return t;
+      });
+      tabsRef.current = next;
+      return next;
+    });
+  }, [projectPath, updateInMemoryPakFiles]);
 
   // Transfer item edit to in-memory .pak file and update in-memory items
   const handleTransferItemToMemory = useCallback(async (relPath: string, updatedItem: PakItem, targetId: string) => {
@@ -1001,12 +1036,17 @@ export const App: React.FC = () => {
   const handleSaveAllDirtyFiles = useCallback(async () => {
     if (!projectPath) return;
 
+    const currentPakFiles = inMemoryPakFilesRef.current;
+    const currentTabs = tabsRef.current;
+
     const unsavedCopies: string[] = [];
-    for (const [relPath, fileData] of Object.entries(inMemoryPakFiles)) {
+    const savedDiskPaks: Record<string, string> = {};
+    for (const [relPath, fileData] of Object.entries(currentPakFiles)) {
       if (fileData.isDirty) {
         const fullPath = isAbsolutePath(relPath) ? relPath : `${projectPath}/${relPath}`;
         try {
           await invoke('write_text_file', { filePath: fullPath, content: fileData.content });
+          savedDiskPaks[relPath] = fileData.content;
           setConsoleOutput(prev => prev + `Saved: ${relPath}\n`);
         } catch (err) {
           console.error(`Failed to save ${relPath}:`, err);
@@ -1017,11 +1057,13 @@ export const App: React.FC = () => {
 
     const savedTextTabs: Array<{ filePath: string; content: string }> = [];
     const failedTabIds = new Set<string>();
-    for (const tab of tabs) {
+    for (const tab of currentTabs) {
       if (tab.isDirty && !tab.filePath.startsWith('special:')) {
         try {
           if (tab.viewType === 'image') {
-            await invoke('write_file_base64', { filePath: tab.filePath, base64Data: tab.content });
+            if (tab.content) {
+              await invoke('write_file_base64', { filePath: tab.filePath, base64Data: tab.content });
+            }
           } else {
             await invoke('write_text_file', { filePath: tab.filePath, content: tab.content });
             savedTextTabs.push({ filePath: tab.filePath, content: tab.content });
@@ -1034,16 +1076,24 @@ export const App: React.FC = () => {
       }
     }
 
+    if (Object.keys(savedDiskPaks).length > 0) {
+      setDiskPakContents(prev => ({ ...prev, ...savedDiskPaks }));
+    }
+
     // A tab saved after the panels' copy of the same file holds newer text: the copy takes that
     // text, so a later panel edit doesn't start from (and save) older text.
-    setInMemoryPakFiles(prev => copiesAfterSavingAll(prev, savedTextTabs, unsavedCopies, projectPath));
+    updateInMemoryPakFiles(prev => copiesAfterSavingAll(prev, savedTextTabs, unsavedCopies, projectPath));
 
-    setTabs(prev => prev.map(t => (
-      failedTabIds.has(t.id) || (t.filePath.startsWith('special:') && unsavedCopies.length > 0)
-        ? t
-        : { ...t, isDirty: false }
-    )));
-  }, [projectPath, inMemoryPakFiles, tabs]);
+    setTabs(prev => {
+      const next = prev.map(t => (
+        failedTabIds.has(t.id) || (t.filePath.startsWith('special:') && unsavedCopies.length > 0)
+          ? t
+          : { ...t, isDirty: false }
+      ));
+      tabsRef.current = next;
+      return next;
+    });
+  }, [projectPath, updateInMemoryPakFiles]);
 
   const hasDirtyPakFiles = useMemo(() => {
     return Object.values(inMemoryPakFiles).some(f => f.isDirty);
@@ -1073,10 +1123,36 @@ export const App: React.FC = () => {
   activeTabIdRef.current = activeTabId;
 
   const inspectorSaveHandlerRef = useRef<(() => Promise<void>) | null>(null);
+  const inspectorFlushHandlerRef = useRef<(() => Promise<void>) | null>(null);
 
   const handleRegisterInspectorSave = useCallback((handler: () => Promise<void>) => {
     inspectorSaveHandlerRef.current = handler;
   }, []);
+
+  const handleRegisterInspectorFlush = useCallback((handler: () => Promise<void>) => {
+    inspectorFlushHandlerRef.current = handler;
+  }, []);
+
+  const flushActiveInspectorIfNeeded = useCallback(async () => {
+    const cur = activeTabIdRef.current;
+    if (
+      (cur === 'special:items' || cur === 'special:objects' || cur === 'special:rooms') &&
+      inspectorFlushHandlerRef.current
+    ) {
+      await inspectorFlushHandlerRef.current();
+    }
+  }, []);
+
+  const handleSelectTab = useCallback(async (nextTabId: string) => {
+    if (nextTabId === activeTabIdRef.current) return;
+    try {
+      await flushActiveInspectorIfNeeded();
+    } catch (err) {
+      console.error('Failed to flush active inspector before switching tabs:', err);
+      return;
+    }
+    setActiveTabId(nextTabId);
+  }, [flushActiveInspectorIfNeeded]);
 
   // Save current active tab
   const handleSaveActiveTab = useCallback(async () => {
@@ -1096,6 +1172,7 @@ export const App: React.FC = () => {
 
     try {
       if (current.viewType === 'image') {
+        if (!current.content) return;
         await invoke('write_file_base64', {
           filePath: current.filePath,
           base64Data: current.content
@@ -1107,14 +1184,18 @@ export const App: React.FC = () => {
         });
       }
 
-      setTabs(prev => prev.map(t => (t.id === current.id ? { ...t, isDirty: false } : t)));
+      setTabs(prev => {
+        const next = prev.map(t => (t.id === current.id ? { ...t, isDirty: false } : t));
+        tabsRef.current = next;
+        return next;
+      });
       setConsoleOutput(prev => prev + `Saved: ${current.title}\n`);
 
       // If a .pak file was saved in Monaco, the panels' copy of it is now older than the file:
       // replace it with the saved text so the next panel edit starts from it, and reload the inspectors.
       if (current.filePath.toLowerCase().endsWith('.pak')) {
         if (projectPath) {
-          setInMemoryPakFiles(prev => copiesAfterTextSave(prev, current.filePath, current.content, projectPath));
+          updateInMemoryPakFiles(prev => copiesAfterTextSave(prev, current.filePath, current.content, projectPath));
         }
         reloadProjectInspectors(files);
       }
@@ -1159,7 +1240,7 @@ export const App: React.FC = () => {
       const fullPath = targetRelPath.startsWith('/') ? targetRelPath : `${projectPath}/${targetRelPath}`;
       await invoke('write_text_file', { filePath: fullPath, content: newContent });
 
-      setInMemoryPakFiles(prev => ({
+      updateInMemoryPakFiles(prev => ({
         ...prev,
         [targetRelPath!]: { content: newContent, isDirty: false }
       }));
@@ -1192,7 +1273,7 @@ export const App: React.FC = () => {
         const fullPath = targetRelPath.startsWith('/') ? targetRelPath : `${projectPath}/${targetRelPath}`;
         await invoke('write_text_file', { filePath: fullPath, content: newContent });
 
-        setInMemoryPakFiles(prev => ({
+        updateInMemoryPakFiles(prev => ({
           ...prev,
           [targetRelPath]: { content: newContent, isDirty: false }
         }));
@@ -1233,12 +1314,16 @@ export const App: React.FC = () => {
   }, [projectPath, files]);
 
   // Close tab
-  const handleCloseTab = (id: string, e: React.MouseEvent) => {
+  const handleCloseTab = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    const remaining = tabs.filter(t => t.id !== id);
+    if (id === activeTabIdRef.current) {
+      try { await flushActiveInspectorIfNeeded(); } catch { return; }
+    }
+    const remaining = tabsRef.current.filter(t => t.id !== id);
+    tabsRef.current = remaining;
     setTabs(remaining);
 
-    if (activeTabId === id) {
+    if (activeTabIdRef.current === id) {
       setActiveTabId(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
     }
   };
@@ -1263,7 +1348,13 @@ export const App: React.FC = () => {
     // Clear previous line highlights
     setTabs(prev => prev.map(t => ({ ...t, targetLine: undefined })));
 
-    // 1. Save all dirty in-memory files and tabs before compiling
+    // 1. Flush active visual inspector and save all dirty in-memory files and tabs before compiling
+    try {
+      await flushActiveInspectorIfNeeded();
+    } catch (err) {
+      setConsoleOutput(prev => prev + `Error saving active inspector before compile: ${err}\n`);
+      return;
+    }
     await handleSaveAllDirtyFiles();
 
     setIsCompiling(true);
@@ -1350,6 +1441,7 @@ export const App: React.FC = () => {
   // Jump to error line in Monaco
   const handleProblemClick = async (file?: string, line?: number) => {
     if (!file || !projectPath) return;
+    try { await flushActiveInspectorIfNeeded(); } catch { return; }
 
     // Resolve file path
     const fullPath = isAbsolutePath(file) ? file : `${projectPath}/${file}`;
@@ -1488,7 +1580,7 @@ export const App: React.FC = () => {
           <WorkspaceTabs
             tabs={tabs}
             activeTabId={activeTabId}
-            onSelectTab={setActiveTabId}
+            onSelectTab={handleSelectTab}
             onCloseTab={handleCloseTab}
           />
 
@@ -1506,6 +1598,7 @@ export const App: React.FC = () => {
                 hasUnsavedChanges={hasDirtyPakFiles}
                 onOpenImageFile={handleOpenImageFile}
                 onRegisterSaveHandler={handleRegisterInspectorSave}
+                onRegisterFlushHandler={handleRegisterInspectorFlush}
               />
             ) : activeTab?.viewType === 'objects' && projectPath ? (
               <ObjectInspector
@@ -1520,6 +1613,7 @@ export const App: React.FC = () => {
                 hasUnsavedChanges={hasDirtyPakFiles}
                 onOpenImageFile={handleOpenImageFile}
                 onRegisterSaveHandler={handleRegisterInspectorSave}
+                onRegisterFlushHandler={handleRegisterInspectorFlush}
               />
             ) : activeTab?.viewType === 'rooms' && projectPath ? (
               <RoomInspector
@@ -1536,6 +1630,7 @@ export const App: React.FC = () => {
                 onSaveAll={handleSaveAllDirtyFiles}
                 hasUnsavedChanges={hasDirtyPakFiles}
                 onRegisterSaveHandler={handleRegisterInspectorSave}
+                onRegisterFlushHandler={handleRegisterInspectorFlush}
                 onOpenTmxFile={(tmxName) => {
                   const matched = files.find(f => f.name.toLowerCase() === tmxName.toLowerCase() || f.relative_path.toLowerCase() === tmxName.toLowerCase());
                   if (matched) handleFileSelect(matched);

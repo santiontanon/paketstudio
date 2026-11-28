@@ -37,6 +37,7 @@ interface ItemInspectorProps {
   hasUnsavedChanges: boolean;
   onOpenImageFile?: (fileName: string) => void;
   onRegisterSaveHandler?: (handler: () => Promise<void>) => void;
+  onRegisterFlushHandler?: (handler: () => Promise<void>) => void;
 }
 
 export const ItemInspector: React.FC<ItemInspectorProps> = ({
@@ -50,7 +51,8 @@ export const ItemInspector: React.FC<ItemInspectorProps> = ({
   onSaveAll,
   hasUnsavedChanges,
   onOpenImageFile,
-  onRegisterSaveHandler
+  onRegisterSaveHandler,
+  onRegisterFlushHandler
 }) => {
   const [selectedItemKey, setSelectedItemKey] = useState<string | null>(() => {
     return items.length > 0 ? `${items[0].filePath}:${items[0].id}` : null;
@@ -396,6 +398,18 @@ export const ItemInspector: React.FC<ItemInspectorProps> = ({
     }
   }, [onRegisterSaveHandler, handleSaveItem]);
 
+  const handleFlushItem = useCallback(async () => {
+    if (isDirty) {
+      await flushCurrentItemToMemory();
+    }
+  }, [isDirty, flushCurrentItemToMemory]);
+
+  useEffect(() => {
+    if (onRegisterFlushHandler) {
+      onRegisterFlushHandler(handleFlushItem);
+    }
+  }, [onRegisterFlushHandler, handleFlushItem]);
+
   // Keyboard shortcut Cmd+S to save, Cmd+Z to undo, Cmd+Shift+Z / Ctrl+Y to redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -479,6 +493,9 @@ export const ItemInspector: React.FC<ItemInspectorProps> = ({
     };
 
     try {
+      if (isDirty) {
+        await flushCurrentItemToMemory();
+      }
       await onCreateItemInMemory(newTargetFile, newItem);
       setIsNewModalOpen(false);
       loadedItemKeyRef.current = null;

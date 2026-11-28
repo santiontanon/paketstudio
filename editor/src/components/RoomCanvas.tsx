@@ -236,10 +236,10 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
         if (nextMap.has(file)) continue;
 
         const candidates: string[] = [];
-        if (file.startsWith('/')) {
+        if (isAbsolutePath(file)) {
           candidates.push(file);
         } else {
-          if (tmxDir) candidates.push(`${projectPath}/${tmxDir}/${file}`);
+          if (tmxDir) candidates.push(`${tmxDir}/${file}`);
           candidates.push(`${projectPath}/${file}`);
           const match = files.find(f => f.name === file || f.relative_path.endsWith(`/${file}`));
           if (match && !candidates.includes(match.path)) {

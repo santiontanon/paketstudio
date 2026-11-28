@@ -41,6 +41,8 @@ interface PixelEditorPaneProps {
   filePath: string;
   title: string;
   platform: Platform;
+  initialDataUrl?: string;
+  isTabDirty: boolean;
   palette?: PaletteColor[];
   tolerance?: number;
   onOpenPaletteManager?: () => void;
@@ -58,6 +60,8 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
   filePath,
   title,
   platform,
+  initialDataUrl,
+  isTabDirty,
   palette: paletteProp,
   tolerance: toleranceProp,
   onOpenPaletteManager,
@@ -126,7 +130,13 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
   const [hoverColor, setHoverColor] = useState<string | null>(null);
 
-  const [isDirty, setIsDirty] = useState<boolean>(false);
+  const [isDirty, setIsDirty] = useState<boolean>(Boolean(initialDataUrl));
+
+  useEffect(() => {
+    if (!isTabDirty) {
+      setIsDirty(false);
+    }
+  }, [isTabDirty]);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -138,7 +148,9 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
   const displayCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isMouseDownRef = useRef<boolean>(false);
+  const strokeModifiedRef = useRef<boolean>(false);
   const lastPixelRef = useRef<{ x: number; y: number } | null>(null);
+  const initialDataUrlRef = useRef<string | undefined>(initialDataUrl);
 
   // Undo / Redo history
   const historyRef = useRef<ImageData[]>([]);
@@ -269,13 +281,17 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
   const renderDisplayCanvasRef = useRef(renderDisplayCanvas);
   renderDisplayCanvasRef.current = renderDisplayCanvas;
 
-  // Load the image from disk via base64 (only when filePath changes)
+  // Load the image from unsaved in-memory dataUrl (if returning to a dirty tab) or from disk
   useEffect(() => {
     let isCancelled = false;
     setIsLoading(true);
     setError(null);
 
-    invoke<string>('read_file_base64', { filePath })
+    const loadDataUrl = initialDataUrlRef.current
+      ? Promise.resolve(initialDataUrlRef.current)
+      : invoke<string>('read_file_base64', { filePath });
+
+    loadDataUrl
       .then((dataUrl) => {
         if (isCancelled) return;
 
@@ -405,8 +421,6 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     const ctx = offscreen.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
 
-    pushUndoState();
-
     const imgData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
     const data = imgData.data;
     let convertedCount = 0;
@@ -429,6 +443,7 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     }
 
     ctx.putImageData(imgData, 0, 0);
+    pushUndoState();
     notifyDirty();
     renderDisplayCanvas();
     setPaletteCheckResult({ checked: true, valid: true, invalidCount: 0, invalidPixels: [] });
@@ -568,14 +583,11 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     // Right-click triggers eyedropper immediately
     const toolToUse = e.button === 2 ? 'picker' : activeTool;
 
-    if (toolToUse !== 'picker') {
-      pushUndoState();
-    }
-
     applyToolAtPixel(coords.x, coords.y, toolToUse);
     renderDisplayCanvas();
 
     if (toolToUse !== 'picker') {
+      strokeModifiedRef.current = true;
       notifyDirty();
     }
   };
@@ -611,19 +623,27 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     if (last && (last.x !== coords.x || last.y !== coords.y)) {
       drawLine(last.x, last.y, coords.x, coords.y, activeTool);
       lastPixelRef.current = coords;
+      strokeModifiedRef.current = true;
       renderDisplayCanvas();
       notifyDirty();
     }
   };
 
-  const handleMouseUp = () => {
+  const finishStroke = () => {
+    if (strokeModifiedRef.current) {
+      pushUndoState();
+      strokeModifiedRef.current = false;
+    }
     isMouseDownRef.current = false;
     lastPixelRef.current = null;
   };
 
+  const handleMouseUp = () => {
+    finishStroke();
+  };
+
   const handleMouseLeave = () => {
-    isMouseDownRef.current = false;
-    lastPixelRef.current = null;
+    finishStroke();
     setCursorPos(null);
     setHoverColor(null);
   };
@@ -685,8 +705,6 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
     const ctx = offscreen.getContext('2d');
     if (!ctx) return;
 
-    pushUndoState();
-
     const oldData = ctx.getImageData(0, 0, offscreen.width, offscreen.height);
 
     offscreen.width = newWidth;
@@ -708,6 +726,11 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
   // Global keyboard shortcuts within editor pane
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+        return;
+      }
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -715,12 +738,17 @@ export const PixelEditorPane: React.FC<PixelEditorPaneProps> = ({
         } else {
           handleUndo();
         }
-      } else if (e.key === 'p' || e.key === 'P') {
-        setActiveTool('pencil');
-      } else if (e.key === 'e' || e.key === 'E') {
-        setActiveTool('eraser');
-      } else if (e.key === 'i' || e.key === 'I') {
-        setActiveTool('picker');
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      } else if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+        if (e.key === 'p' || e.key === 'P') {
+          setActiveTool('pencil');
+        } else if (e.key === 'e' || e.key === 'E') {
+          setActiveTool('eraser');
+        } else if (e.key === 'i' || e.key === 'I') {
+          setActiveTool('picker');
+        }
       }
     };
 

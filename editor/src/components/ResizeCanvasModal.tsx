@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Maximize2, X } from 'lucide-react';
 
 interface ResizeCanvasModalProps {
@@ -19,6 +19,14 @@ export const ResizeCanvasModal: React.FC<ResizeCanvasModalProps> = ({
   const [width, setWidth] = useState<number>(currentWidth);
   const [height, setHeight] = useState<number>(currentHeight);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setWidth(currentWidth);
+      setHeight(currentHeight);
+      setError(null);
+    }
+  }, [isOpen, currentWidth, currentHeight]);
 
   if (!isOpen) return null;
 

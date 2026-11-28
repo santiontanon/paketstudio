@@ -108,6 +108,7 @@ interface RoomInspectorProps {
   hasUnsavedChanges: boolean;
   onOpenTmxFile?: (fileName: string) => void;
   onRegisterSaveHandler?: (handler: () => Promise<void>) => void;
+  onRegisterFlushHandler?: (handler: () => Promise<void>) => void;
 }
 
 export const RoomInspector: React.FC<RoomInspectorProps> = ({
@@ -124,7 +125,8 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   onSaveAll,
   hasUnsavedChanges,
   onOpenTmxFile,
-  onRegisterSaveHandler
+  onRegisterSaveHandler,
+  onRegisterFlushHandler
 }) => {
   const [selectedRoomKey, setSelectedRoomKey] = useState<string | null>(() => {
     return rooms.length > 0 ? `${rooms[0].filePath}:${rooms[0].id}` : null;
@@ -459,6 +461,18 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
       onRegisterSaveHandler(handleSaveRoom);
     }
   }, [onRegisterSaveHandler, handleSaveRoom]);
+
+  const handleFlushRoom = useCallback(async () => {
+    if (isDirty || isTmxDirty) {
+      await transferCurrentRoomToMemory();
+    }
+  }, [isDirty, isTmxDirty, transferCurrentRoomToMemory]);
+
+  useEffect(() => {
+    if (onRegisterFlushHandler) {
+      onRegisterFlushHandler(handleFlushRoom);
+    }
+  }, [onRegisterFlushHandler, handleFlushRoom]);
 
   const pushHistory = useCallback((
     snapshotData?: {
