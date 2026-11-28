@@ -29,7 +29,8 @@ import {
   getNextAvailableObjectId,
   getPaketObjectId,
   setPaketObjectId,
-  isObjectIdTaken
+  isObjectIdTaken,
+  defaultTileGidForLayer
 } from '../utils/tmxParser';
 import { parentDir, isAbsolutePath } from '../utils/paths';
 import { statePreviewImage } from '../utils/pakParser';
@@ -383,11 +384,12 @@ export const RoomCanvas: React.FC<RoomCanvasProps> = ({
     let targetLayer: TmxLayer;
 
     if (targetLayerIndex === -1) {
+      const layerName = isCollision ? 'collision' : 'background';
       targetLayer = {
-        name: isCollision ? 'collision' : 'background',
+        name: layerName,
         width: currentData.width,
         height: currentData.height,
-        data: new Array(currentData.width * currentData.height).fill(0),
+        data: new Array(currentData.width * currentData.height).fill(defaultTileGidForLayer(layerName)),
         visible: !isCollision,
       };
       if (isCollision) {

@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  insertItemIntoContent,
+  insertObjectIntoContent,
   insertRoomIntoContent,
   parsePakFile,
   statePreviewImage,
@@ -399,5 +401,59 @@ describe('creating a room', () => {
     const saved = insertRoomIntoContent(ROOMS_PAK, newRoom);
 
     expect(saved).toBe(`${ROOMS_PAK.trimEnd()}\n\nroom("stage", "room16.tmx", 0, 0):\n`);
+  });
+});
+
+describe('inserting objects and items before rooms', () => {
+  const TEMPLATE_PAK = [
+    'pointers("pointers.png")',
+    '',
+    'room("room1", "room.tmx", 0, 0):',
+  ].join('\n');
+
+  const newObj = (id: string) => ({
+    id,
+    name: id,
+    description: `A ${id}.`,
+    states: [],
+    rules: [],
+    filePath: 'game.pak',
+    startLine: 0,
+    endLine: 0,
+  });
+
+  const newItem = (id: string) => ({
+    id,
+    name: id,
+    description: `A ${id}.`,
+    rules: [],
+    filePath: 'game.pak',
+    startLine: 0,
+    endLine: 0,
+  });
+
+  it('inserts the first object before the first room declaration', () => {
+    const saved = insertObjectIntoContent(TEMPLATE_PAK, newObj('lamp'));
+
+    expect(saved.indexOf('object("lamp"')).toBeGreaterThan(saved.indexOf('pointers("pointers.png")'));
+    expect(saved.indexOf('object("lamp"')).toBeLessThan(saved.indexOf('room("room1"'));
+  });
+
+  it('inserts a second object right after the last existing object, still before rooms', () => {
+    const withFirst = insertObjectIntoContent(TEMPLATE_PAK, newObj('lamp'));
+    const withSecond = insertObjectIntoContent(withFirst, newObj('table'));
+
+    expect(withSecond.indexOf('object("lamp"')).toBeGreaterThan(-1);
+    expect(withSecond.indexOf('object("lamp"')).toBeLessThan(withSecond.indexOf('object("table"'));
+    expect(withSecond.indexOf('object("table"')).toBeLessThan(withSecond.indexOf('room("room1"'));
+  });
+
+  it('inserts the first item before existing objects and rooms', () => {
+    const withObj = insertObjectIntoContent(TEMPLATE_PAK, newObj('lamp'));
+    const withItem = insertItemIntoContent(withObj, newItem('item-key'));
+
+    expect(withItem.indexOf('item(item-key')).toBeGreaterThan(-1);
+    expect(withItem.indexOf('item(item-key')).toBeLessThan(withItem.indexOf('object("lamp"'));
+    expect(withItem.indexOf('object("lamp"')).toBeLessThan(withItem.indexOf('room("room1"'));
   });
 });

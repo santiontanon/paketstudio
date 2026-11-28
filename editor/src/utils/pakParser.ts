@@ -780,18 +780,20 @@ function directiveEditor(source: string[], header: LineSpan, directives: Array<L
 }
 
 /**
- * Inserts a new item after the last existing item in content, or appends at the end.
+ * Inserts a declaration block after the last existing block of the same kind, or before the
+ * earliest block in `beforeBlocks`, or appends at the end of the file.
  */
-export function insertItemIntoContent(content: string, item: PakItem): string {
-  const { items } = parsePakFile(content, item.filePath);
-  const blockText = generateItemBlock(item);
-
-  if (items.length > 0) {
-    // Find the last item by endLine
+function insertBlockIntoContent(
+  content: string,
+  blockText: string,
+  existingBlocks: Array<{ endLine: number }>,
+  beforeBlocks: Array<{ startLine: number }>
+): string {
+  if (existingBlocks.length > 0) {
     let maxEndLine = -1;
-    for (const it of items) {
-      if (it.endLine > maxEndLine) {
-        maxEndLine = it.endLine;
+    for (const block of existingBlocks) {
+      if (block.endLine > maxEndLine) {
+        maxEndLine = block.endLine;
       }
     }
     const lines = content.split(/\r?\n/);
@@ -799,9 +801,34 @@ export function insertItemIntoContent(content: string, item: PakItem): string {
     return lines.join('\n');
   }
 
-  // If no items exist, append at the end of the file with clean separation
+  if (beforeBlocks.length > 0) {
+    let firstStartLine = Infinity;
+    for (const block of beforeBlocks) {
+      if (block.startLine < firstStartLine) {
+        firstStartLine = block.startLine;
+      }
+    }
+    const lines = content.split(/\r?\n/);
+    const needsLeadingBlank = firstStartLine > 0 && lines[firstStartLine - 1].trim() !== '';
+    if (needsLeadingBlank) {
+      lines.splice(firstStartLine, 0, '', blockText, '');
+    } else {
+      lines.splice(firstStartLine, 0, blockText, '');
+    }
+    return lines.join('\n');
+  }
+
   const trimmed = content.trimEnd();
   return trimmed ? `${trimmed}\n\n${blockText}\n` : `${blockText}\n`;
+}
+
+/**
+ * Inserts a new item after the last existing item in content, before objects/rooms if none exist,
+ * or appends at the end.
+ */
+export function insertItemIntoContent(content: string, item: PakItem): string {
+  const { items, objects, rooms } = parsePakFile(content, item.filePath);
+  return insertBlockIntoContent(content, generateItemBlock(item), items, [...objects, ...rooms]);
 }
 
 /**
@@ -872,26 +899,12 @@ export function deleteItemFromContent(content: string, targetId: string, filePat
 }
 
 /**
- * Inserts a new object after the last existing object in content, or appends at the end.
+ * Inserts a new object after the last existing object in content, before rooms if none exist,
+ * or appends at the end.
  */
 export function insertObjectIntoContent(content: string, obj: PakObject): string {
-  const { objects } = parsePakFile(content, obj.filePath);
-  const blockText = generateObjectBlock(obj);
-
-  if (objects.length > 0) {
-    let maxEndLine = -1;
-    for (const o of objects) {
-      if (o.endLine > maxEndLine) {
-        maxEndLine = o.endLine;
-      }
-    }
-    const lines = content.split(/\r?\n/);
-    lines.splice(maxEndLine + 1, 0, '', blockText);
-    return lines.join('\n');
-  }
-
-  const trimmed = content.trimEnd();
-  return trimmed ? `${trimmed}\n\n${blockText}\n` : `${blockText}\n`;
+  const { objects, rooms } = parsePakFile(content, obj.filePath);
+  return insertBlockIntoContent(content, generateObjectBlock(obj), objects, rooms);
 }
 
 /**
@@ -982,22 +995,7 @@ export function generateRoomBlock(room: PakRoom): string {
  */
 export function insertRoomIntoContent(content: string, room: PakRoom): string {
   const { rooms } = parsePakFile(content, room.filePath);
-  const blockText = generateRoomBlock(room);
-
-  if (rooms.length > 0) {
-    let maxEndLine = -1;
-    for (const r of rooms) {
-      if (r.endLine > maxEndLine) {
-        maxEndLine = r.endLine;
-      }
-    }
-    const lines = content.split(/\r?\n/);
-    lines.splice(maxEndLine + 1, 0, '', blockText);
-    return lines.join('\n');
-  }
-
-  const trimmed = content.trimEnd();
-  return trimmed ? `${trimmed}\n\n${blockText}\n` : `${blockText}\n`;
+  return insertBlockIntoContent(content, generateRoomBlock(room), rooms, []);
 }
 
 /**

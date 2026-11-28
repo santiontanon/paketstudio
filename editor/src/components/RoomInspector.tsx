@@ -24,6 +24,7 @@ import {
   validateObjectIds,
   resolveExternalTilesets,
   createEmptyTmxData,
+  createEmbeddedTileset,
   resizeTmxData
 } from '../utils/tmxParser';
 import {
@@ -33,7 +34,7 @@ import {
   validateRoomDimensions,
   isCpcPlatform
 } from '../utils/screenAreas';
-import { parentDir } from '../utils/paths';
+import { parentDir, relativePathFromDir } from '../utils/paths';
 import { RoomCanvas } from './RoomCanvas';
 import { ResizeRoomModal } from './ResizeRoomModal';
 import {
@@ -43,8 +44,37 @@ import {
   MAX_INSPECTOR_SIDEBAR_WIDTH,
   DEFAULT_MAX_HISTORY_STEPS,
   DEFAULT_NEW_TMX_NAME,
+  DEFAULT_TILESET_FILENAME,
+  DEFAULT_BACKGROUND_TILE_GID,
   MIN_ROOM_SIZE
 } from '../constants';
+
+function pickDefaultTilesetPng(
+  pngFiles: FileNode[],
+  targetPak: string,
+  activeTilesetSource?: string
+): string {
+  if (pngFiles.length === 0) return '';
+  const pakDir = parentDir(targetPak).toLowerCase();
+  const inPakDir = pakDir
+    ? pngFiles.filter(f => parentDir(f.relative_path).toLowerCase() === pakDir)
+    : pngFiles;
+
+  const preferredBg =
+    inPakDir.find(f => f.name.toLowerCase() === DEFAULT_TILESET_FILENAME) ??
+    pngFiles.find(f => f.name.toLowerCase() === DEFAULT_TILESET_FILENAME);
+  if (preferredBg) return preferredBg.relative_path;
+
+  if (activeTilesetSource) {
+    const activeName = (activeTilesetSource.split('/').pop() || activeTilesetSource).toLowerCase();
+    const matchedActive =
+      inPakDir.find(f => f.name.toLowerCase() === activeName) ??
+      pngFiles.find(f => f.name.toLowerCase() === activeName);
+    if (matchedActive) return matchedActive.relative_path;
+  }
+
+  return (inPakDir[0] ?? pngFiles[0]).relative_path;
+}
 
 function findTmxFileNode(files: FileNode[], tmxFile: string, pakFilePath: string): FileNode | undefined {
   const clean = tmxFile.trim().toLowerCase();
@@ -181,11 +211,14 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
   const [isNewRoomTmxManuallyEdited, setIsNewRoomTmxManuallyEdited] = useState(false);
   const [newRoomWidth, setNewRoomWidth] = useState(16);
   const [newRoomHeight, setNewRoomHeight] = useState(11);
+  const [newRoomTilesetPng, setNewRoomTilesetPng] = useState('');
+  const [newRoomTilesetDims, setNewRoomTilesetDims] = useState<{ width: number; height: number } | null>(null);
+  const [isLoadingNewRoomTileset, setIsLoadingNewRoomTileset] = useState(false);
   const [newRoomTargetFile, setNewRoomTargetFile] = useState('');
   const [newRoomSubroom, setNewRoomSubroom] = useState(false);
   const [newRoomError, setNewRoomError] = useState<string | null>(null);
 
-  // Pak and Tmx file lists in project
+  // Pak, Tmx, and Png file lists in project
   const pakFiles = useMemo(() => {
     return files
       .filter(f => f.extension.toLowerCase() === 'pak')
@@ -196,6 +229,10 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
     return files
       .filter(f => f.extension.toLowerCase() === 'tmx')
       .map(f => f.name);
+  }, [files]);
+
+  const pngFiles = useMemo(() => {
+    return files.filter(f => f.extension.toLowerCase() === 'png' && !f.is_dir);
   }, [files]);
 
   // Filter rooms by search
@@ -640,10 +677,56 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
     pushHistory({ objects: nextObjects, selectedObjectId: newObj.id });
   }, [tmxData, pushHistory]);
 
+  // Load selected tileset PNG dimensions for the New Room modal
+  useEffect(() => {
+    if (!isNewRoomModalOpen || newRoomTmxMode !== 'new' || !newRoomTilesetPng || !projectPath) {
+      setNewRoomTilesetDims(null);
+      setIsLoadingNewRoomTileset(false);
+      return;
+    }
+
+    let isCancelled = false;
+    setIsLoadingNewRoomTileset(true);
+    const fullPath = `${projectPath}/${newRoomTilesetPng}`;
+
+    invoke<string>('read_file_base64', { filePath: fullPath })
+      .then(base64Data => {
+        if (isCancelled) return;
+        const img = new Image();
+        img.onload = () => {
+          if (isCancelled) return;
+          setNewRoomTilesetDims({ width: img.naturalWidth, height: img.naturalHeight });
+          setIsLoadingNewRoomTileset(false);
+        };
+        img.onerror = () => {
+          if (isCancelled) return;
+          setNewRoomTilesetDims(null);
+          setNewRoomError(`Could not decode image "${newRoomTilesetPng}".`);
+          setIsLoadingNewRoomTileset(false);
+        };
+        img.src = base64Data;
+      })
+      .catch(err => {
+        if (isCancelled) return;
+        setNewRoomTilesetDims(null);
+        setNewRoomError(`Could not read image "${newRoomTilesetPng}": ${err}`);
+        setIsLoadingNewRoomTileset(false);
+      });
+
+    return () => { isCancelled = true; };
+  }, [isNewRoomModalOpen, newRoomTmxMode, newRoomTilesetPng, projectPath]);
+
+  const newRoomTilesetCount = useMemo(() => {
+    if (!newRoomTilesetDims) return 0;
+    const cols = Math.floor(newRoomTilesetDims.width / defaultTileSize.tileWidth);
+    const rows = Math.floor(newRoomTilesetDims.height / defaultTileSize.tileHeight);
+    return cols * rows;
+  }, [newRoomTilesetDims, defaultTileSize.tileWidth, defaultTileSize.tileHeight]);
+
   // Live validation for Create New Room modal
   const newRoomDimensionError = useMemo(() => {
     if (newRoomTmxMode !== 'new') return null;
-    return validateRoomDimensions(
+    const dimErr = validateRoomDimensions(
       newRoomWidth,
       newRoomHeight,
       0,
@@ -651,7 +734,25 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
       projectScreenGuidelines.gameArea.width,
       projectScreenGuidelines.gameArea.height
     );
-  }, [newRoomTmxMode, newRoomWidth, newRoomHeight, projectScreenGuidelines.gameArea.width, projectScreenGuidelines.gameArea.height]);
+    if (dimErr) return dimErr;
+    if (pngFiles.length > 0 && !isLoadingNewRoomTileset && newRoomTilesetPng && newRoomTilesetDims && newRoomTilesetCount <= 0) {
+      return `Selected image is smaller than a ${defaultTileSize.tileWidth}×${defaultTileSize.tileHeight} tile.`;
+    }
+    return null;
+  }, [
+    newRoomTmxMode,
+    newRoomWidth,
+    newRoomHeight,
+    projectScreenGuidelines.gameArea.width,
+    projectScreenGuidelines.gameArea.height,
+    pngFiles.length,
+    isLoadingNewRoomTileset,
+    newRoomTilesetPng,
+    newRoomTilesetDims,
+    newRoomTilesetCount,
+    defaultTileSize.tileWidth,
+    defaultTileSize.tileHeight
+  ]);
 
   // Create New Room
   const handleCreateRoom = async (e: React.FormEvent) => {
@@ -700,12 +801,33 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
         return;
       }
 
+      const initialTilesets: TmxTileset[] = [];
+      if (pngFiles.length > 0) {
+        if (!newRoomTilesetPng || !newRoomTilesetDims || newRoomTilesetCount <= 0) {
+          setNewRoomError('Please select a valid tileset PNG image.');
+          return;
+        }
+        const tmxDirRel = parentDir(targetRelPath);
+        const relImgSource = relativePathFromDir(tmxDirRel, newRoomTilesetPng);
+        initialTilesets.push(
+          createEmbeddedTileset(
+            relImgSource,
+            newRoomTilesetDims.width,
+            newRoomTilesetDims.height,
+            defaultTileSize.tileWidth,
+            defaultTileSize.tileHeight,
+            DEFAULT_BACKGROUND_TILE_GID
+          )
+        );
+      }
+
       defaultTmxXml = serializeTmxXml(
         createEmptyTmxData(
           newRoomWidth,
           newRoomHeight,
           defaultTileSize.tileWidth,
-          defaultTileSize.tileHeight
+          defaultTileSize.tileHeight,
+          initialTilesets
         )
       );
     } else if (!chosenTmx) {
@@ -751,13 +873,15 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
             <button
               className="btn btn-primary btn-sm"
               onClick={() => {
+                const defaultPak = pakFiles[0] || 'game.pak';
                 setNewRoomId('');
                 setNewRoomTmxMode('new');
                 setNewRoomTmx(DEFAULT_NEW_TMX_NAME);
                 setIsNewRoomTmxManuallyEdited(false);
                 setNewRoomWidth(projectScreenGuidelines.gameArea.width);
                 setNewRoomHeight(projectScreenGuidelines.gameArea.height);
-                setNewRoomTargetFile(pakFiles[0] || 'game.pak');
+                setNewRoomTargetFile(defaultPak);
+                setNewRoomTilesetPng(pickDefaultTilesetPng(pngFiles, defaultPak, tmxData?.tilesets[0]?.image.source));
                 setNewRoomSubroom(false);
                 setNewRoomError(null);
                 setIsNewRoomModalOpen(true);
@@ -911,6 +1035,20 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
                     ))}
                   </ul>
                 </div>
+              </div>
+            )}
+
+            {tmxData && tmxData.tilesets.length === 0 && (
+              <div
+                className="inspector-alert"
+                style={{
+                  background: 'rgba(245, 158, 11, 0.12)',
+                  borderColor: 'rgba(245, 158, 11, 0.4)',
+                  color: '#f59e0b',
+                }}
+              >
+                <AlertTriangle size={14} />
+                <span>This room has no tileset attached. Switch to Background mode and click &quot;Add Tileset&quot; before compiling.</span>
               </div>
             )}
 
@@ -1279,44 +1417,79 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
                 </div>
 
                 {newRoomTmxMode === 'new' && (
-                  <div className="form-group-card">
-                    <div className="form-row-2col">
-                      <div className="form-group" style={{ marginBottom: 0 }}>
-                        <label>Width (tiles):</label>
-                        <input
-                          type="number"
-                          className="text-input num-input"
-                          min={MIN_ROOM_SIZE}
-                          max={projectScreenGuidelines.gameArea.width}
-                          value={newRoomWidth}
-                          onChange={e => {
-                            setNewRoomWidth(parseInt(e.target.value, 10) || 0);
-                            setNewRoomError(null);
-                          }}
-                        />
-                        <span className="form-hint">
-                          Max {projectScreenGuidelines.gameArea.width} ({Math.max(0, newRoomWidth) * defaultTileSize.tileWidth} px)
-                        </span>
-                      </div>
-                      <div className="form-group" style={{ marginBottom: 0 }}>
-                        <label>Height (tiles):</label>
-                        <input
-                          type="number"
-                          className="text-input num-input"
-                          min={MIN_ROOM_SIZE}
-                          max={projectScreenGuidelines.gameArea.height}
-                          value={newRoomHeight}
-                          onChange={e => {
-                            setNewRoomHeight(parseInt(e.target.value, 10) || 0);
-                            setNewRoomError(null);
-                          }}
-                        />
-                        <span className="form-hint">
-                          Max {projectScreenGuidelines.gameArea.height} ({Math.max(0, newRoomHeight) * defaultTileSize.tileHeight} px)
-                        </span>
+                  <>
+                    <div className="form-group-card">
+                      <div className="form-row-2col">
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label>Width (tiles):</label>
+                          <input
+                            type="number"
+                            className="text-input num-input"
+                            min={MIN_ROOM_SIZE}
+                            max={projectScreenGuidelines.gameArea.width}
+                            value={newRoomWidth}
+                            onChange={e => {
+                              setNewRoomWidth(parseInt(e.target.value, 10) || 0);
+                              setNewRoomError(null);
+                            }}
+                          />
+                          <span className="form-hint">
+                            Max {projectScreenGuidelines.gameArea.width} ({Math.max(0, newRoomWidth) * defaultTileSize.tileWidth} px)
+                          </span>
+                        </div>
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label>Height (tiles):</label>
+                          <input
+                            type="number"
+                            className="text-input num-input"
+                            min={MIN_ROOM_SIZE}
+                            max={projectScreenGuidelines.gameArea.height}
+                            value={newRoomHeight}
+                            onChange={e => {
+                              setNewRoomHeight(parseInt(e.target.value, 10) || 0);
+                              setNewRoomError(null);
+                            }}
+                          />
+                          <span className="form-hint">
+                            Max {projectScreenGuidelines.gameArea.height} ({Math.max(0, newRoomHeight) * defaultTileSize.tileHeight} px)
+                          </span>
+                        </div>
                       </div>
                     </div>
-                  </div>
+
+                    <div className="form-group">
+                      <label>Tileset PNG Image:</label>
+                      {pngFiles.length > 0 ? (
+                        <>
+                          <select
+                            className="select-input"
+                            value={newRoomTilesetPng}
+                            onChange={e => {
+                              setNewRoomTilesetPng(e.target.value);
+                              setNewRoomError(null);
+                            }}
+                          >
+                            {pngFiles.map(f => (
+                              <option key={f.relative_path} value={f.relative_path}>
+                                {f.relative_path}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="form-hint">
+                            {isLoadingNewRoomTileset
+                              ? 'Reading image dimensions...'
+                              : newRoomTilesetDims
+                                ? `${newRoomTilesetDims.width}×${newRoomTilesetDims.height} px → ${newRoomTilesetCount} tiles (${defaultTileSize.tileWidth}×${defaultTileSize.tileHeight} px)`
+                                : 'Attached as first tileset (GID 1).'}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="form-hint">
+                          No .png files found in this project. You can attach a tileset later before compiling.
+                        </span>
+                      )}
+                    </div>
+                  </>
                 )}
 
                 <div className="form-group">
@@ -1354,7 +1527,12 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={!newRoomId.trim() || !newRoomTmx.trim() || Boolean(newRoomDimensionError)}
+                  disabled={
+                    !newRoomId.trim() ||
+                    !newRoomTmx.trim() ||
+                    Boolean(newRoomDimensionError) ||
+                    (newRoomTmxMode === 'new' && pngFiles.length > 0 && (isLoadingNewRoomTileset || newRoomTilesetCount <= 0))
+                  }
                 >
                   Create Room
                 </button>

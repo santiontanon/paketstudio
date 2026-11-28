@@ -34,3 +34,22 @@ export function isSamePath(a: string | null | undefined, b: string | null | unde
   return normalizePath(a).toLowerCase() === normalizePath(b).toLowerCase();
 }
 
+/**
+ * Computes a forward-slash path to `targetPath` relative to `fromDir`
+ * (both relative to the same root, e.g. projectPath).
+ */
+export function relativePathFromDir(fromDir: string, targetPath: string): string {
+  const fromParts = normalizePath(fromDir).split('/').filter(Boolean);
+  const toParts = normalizePath(targetPath).split('/').filter(Boolean);
+  let common = 0;
+  while (
+    common < fromParts.length &&
+    common < toParts.length - 1 &&
+    fromParts[common] === toParts[common]
+  ) {
+    common++;
+  }
+  const up = new Array<string>(fromParts.length - common).fill('..');
+  return [...up, ...toParts.slice(common)].join('/');
+}
+

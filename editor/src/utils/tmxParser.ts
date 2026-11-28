@@ -4,6 +4,8 @@ import {
   MAX_OBJECT_ID,
   PLAYER_OBJECT_ID,
   DEFAULT_BACKGROUND_LAYER_NAME,
+  DEFAULT_BACKGROUND_TILE_GID,
+  EMPTY_TILE_GID,
   MIN_ROOM_SIZE
 } from '../constants';
 import { parentDir, isAbsolutePath } from './paths';
@@ -370,13 +372,51 @@ export function getNextAvailableObjectId(objects: TmxObject[], isPlayer = false)
 }
 
 /**
- * Builds an empty TmxData structure with a single zero-filled background tile layer.
+ * Default fill tile GID for a layer: 0 for collision layers (empty), 1 for background layers
+ * (tile 0 is invalid for background tiles in the PAKET engine).
+ */
+export function defaultTileGidForLayer(layerName: string): number {
+  return layerName.toLowerCase().includes('collision') ? EMPTY_TILE_GID : DEFAULT_BACKGROUND_TILE_GID;
+}
+
+/**
+ * Builds an embedded TmxTileset descriptor from an image's relative path and pixel dimensions.
+ */
+export function createEmbeddedTileset(
+  imageSource: string,
+  imageWidth: number,
+  imageHeight: number,
+  tilewidth: number,
+  tileheight: number,
+  firstgid: number
+): TmxTileset {
+  const columns = tilewidth > 0 ? Math.floor(imageWidth / tilewidth) : 0;
+  const rows = tileheight > 0 ? Math.floor(imageHeight / tileheight) : 0;
+  const baseName = (imageSource.split('/').pop() || imageSource).replace(/\.[^.]+$/, '') || 'tiles';
+  return {
+    firstgid,
+    name: baseName,
+    tilewidth,
+    tileheight,
+    tilecount: columns * rows,
+    columns,
+    image: {
+      source: imageSource,
+      width: imageWidth,
+      height: imageHeight,
+    },
+  };
+}
+
+/**
+ * Builds an empty TmxData structure with a single background tile layer filled with tile 1.
  */
 export function createEmptyTmxData(
   width: number,
   height: number,
   tilewidth: number,
-  tileheight: number
+  tileheight: number,
+  tilesets: TmxTileset[]
 ): TmxData {
   const safeW = Math.max(MIN_ROOM_SIZE, Math.floor(width));
   const safeH = Math.max(MIN_ROOM_SIZE, Math.floor(height));
@@ -385,13 +425,13 @@ export function createEmptyTmxData(
     height: safeH,
     tilewidth,
     tileheight,
-    tilesets: [],
+    tilesets,
     layers: [
       {
         name: DEFAULT_BACKGROUND_LAYER_NAME,
         width: safeW,
         height: safeH,
-        data: new Array(safeW * safeH).fill(0),
+        data: new Array(safeW * safeH).fill(DEFAULT_BACKGROUND_TILE_GID),
         visible: true,
       },
     ],
@@ -418,7 +458,8 @@ export function getObjectsOutsideRoomBounds(
 
 /**
  * Resizes a TMX map to `newWidth` × `newHeight` tiles (anchored top-left).
- * Existing tile layers are padded with 0 when growing and cropped when shrinking.
+ * Existing tile layers are padded with their default tile GID (1 for background, 0 for collision)
+ * when growing and cropped when shrinking.
  * Objects outside the new pixel bounds are clamped inside (maintaining CPC even-X alignment
  * and relative depth offsets).
  */
@@ -432,12 +473,13 @@ export function resizeTmxData(
   const safeH = Math.max(MIN_ROOM_SIZE, Math.floor(newHeight));
 
   const nextLayers: TmxLayer[] = tmx.layers.map(layer => {
-    const nextData = new Array<number>(safeW * safeH).fill(0);
+    const fillGid = defaultTileGidForLayer(layer.name);
+    const nextData = new Array<number>(safeW * safeH).fill(fillGid);
     const copyRows = Math.min(layer.height, safeH);
     const copyCols = Math.min(layer.width, safeW);
     for (let r = 0; r < copyRows; r++) {
       for (let c = 0; c < copyCols; c++) {
-        nextData[r * safeW + c] = layer.data[r * layer.width + c] ?? 0;
+        nextData[r * safeW + c] = layer.data[r * layer.width + c] ?? fillGid;
       }
     }
     return {

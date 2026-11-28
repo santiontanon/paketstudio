@@ -132,7 +132,7 @@ export const NewFileModal: React.FC<NewFileModalProps> = ({
         const { tileWidth, tileHeight } = getDefaultTileSize(platform);
         const { gameArea } = getScreenGuidelines(platform, pakTexts, tileWidth, tileHeight);
         const tmxContent = serializeTmxXml(
-          createEmptyTmxData(gameArea.width, gameArea.height, tileWidth, tileHeight)
+          createEmptyTmxData(gameArea.width, gameArea.height, tileWidth, tileHeight, [])
         );
         await invoke('write_text_file', {
           filePath: fullPath,

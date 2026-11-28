@@ -2,7 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { parseTmxXml, serializeTmxXml, resolveExternalTilesets, getNextFirstGid, validateObjectIds,
   getPaketObjectId, setPaketObjectId, isObjectIdTaken, getNextAvailableObjectId,
-  createEmptyTmxData, getObjectsOutsideRoomBounds, resizeTmxData } from './tmxParser';
+  createEmptyTmxData, createEmbeddedTileset, getObjectsOutsideRoomBounds, resizeTmxData } from './tmxParser';
 import type { TmxObject } from '../types';
 import cpcTemplateRoom from '../../templates/cpc/room.tmx?raw';
 import msxTemplateRoom from '../../templates/msx/room.tmx?raw';
@@ -217,20 +217,31 @@ describe('choosing the ID for a new object', () => {
 });
 
 describe('creating an empty room map', () => {
-  it('produces a valid TMX with a zero-filled background layer that round-trips through XML', () => {
-    const empty = createEmptyTmxData(12, 8, 16, 8);
+  it('produces a valid TMX with an embedded tileset and background layer filled with tile 1', () => {
+    const tileset = createEmbeddedTileset('bg-tiles.png', 256, 8, 16, 8, 1);
+    const empty = createEmptyTmxData(12, 8, 16, 8, [tileset]);
     const parsed = parseTmxXml(serializeTmxXml(empty));
 
     expect(parsed.width).toBe(12);
     expect(parsed.height).toBe(8);
     expect(parsed.tilewidth).toBe(16);
     expect(parsed.tileheight).toBe(8);
-    expect(parsed.tilesets).toEqual([]);
+    expect(parsed.tilesets).toEqual([
+      {
+        firstgid: 1,
+        name: 'bg-tiles',
+        tilewidth: 16,
+        tileheight: 8,
+        tilecount: 16,
+        columns: 16,
+        image: { source: 'bg-tiles.png', width: 256, height: 8 },
+      },
+    ]);
     expect(parsed.objects).toEqual([]);
     expect(parsed.layers).toHaveLength(1);
     expect(parsed.layers[0].name).toBe('background');
     expect(parsed.layers[0].data).toHaveLength(12 * 8);
-    expect(parsed.layers[0].data.every(v => v === 0)).toBe(true);
+    expect(parsed.layers[0].data.every(v => v === 1)).toBe(true);
   });
 });
 
@@ -259,15 +270,15 @@ describe('resizing a room map', () => {
  </objectgroup>
 </map>`);
 
-  it('pads all tile layers with 0 when growing and preserves existing tiles top-left', () => {
+  it('pads background layers with 1 and collision layers with 0 when growing while preserving existing tiles top-left', () => {
     const { tmx, clampedObjects } = resizeTmxData(sampleMap(), 4, 3, false);
 
     expect(tmx.width).toBe(4);
     expect(tmx.height).toBe(3);
     expect(tmx.layers[0].data).toEqual([
-      1, 2, 3, 0,
-      4, 5, 6, 0,
-      0, 0, 0, 0,
+      1, 2, 3, 1,
+      4, 5, 6, 1,
+      1, 1, 1, 1,
     ]);
     expect(tmx.layers[1].data).toEqual([
       9, 0, 9, 0,
