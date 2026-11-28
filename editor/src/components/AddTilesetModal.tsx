@@ -200,10 +200,12 @@ export const AddTilesetModal: React.FC<AddTilesetModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div
+      className="modal-overlay"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div
         className="modal-card"
-        onClick={e => e.stopPropagation()}
         style={{ width: '480px', maxWidth: '95vw' }}
       >
         <div className="modal-header">

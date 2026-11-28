@@ -539,8 +539,11 @@ export const ProjectExplorer: React.FC<ProjectExplorerProps> = ({
       )}
 
       {fileToRename && (
-        <div className="modal-overlay" onClick={() => !isRenaming && setFileToRename(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { if (e.target === e.currentTarget && !isRenaming) setFileToRename(null); }}
+        >
+          <div className="modal-card" style={{ maxWidth: 420 }}>
             <div className="modal-header">
               <div className="modal-title">
                 <Edit2 size={16} />
@@ -598,8 +601,11 @@ export const ProjectExplorer: React.FC<ProjectExplorerProps> = ({
       )}
 
       {fileToDelete && (
-        <div className="modal-overlay" onClick={() => !isDeleting && setFileToDelete(null)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { if (e.target === e.currentTarget && !isDeleting) setFileToDelete(null); }}
+        >
+          <div className="modal-card" style={{ maxWidth: 420 }}>
             <div className="modal-header">
               <div className="modal-title">
                 <AlertTriangle size={16} style={{ color: 'var(--accent-red)' }} />

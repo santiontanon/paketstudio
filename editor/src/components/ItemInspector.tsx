@@ -892,8 +892,11 @@ export const ItemInspector: React.FC<ItemInspectorProps> = ({
 
       {/* New Item Modal */}
       {isNewModalOpen && (
-        <div className="modal-overlay" onClick={() => setIsNewModalOpen(false)}>
-          <div className="modal-card" onClick={e => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { if (e.target === e.currentTarget) setIsNewModalOpen(false); }}
+        >
+          <div className="modal-card">
             <div className="modal-header">
               <div className="modal-title">
                 <Package size={16} />

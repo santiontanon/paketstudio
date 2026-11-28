@@ -1069,8 +1069,11 @@ export const ObjectInspector: React.FC<ObjectInspectorProps> = ({
 
       {/* New Object Modal */}
       {isNewModalOpen && (
-        <div className="modal-overlay" onClick={() => setIsNewModalOpen(false)}>
-          <div className="modal-card" onClick={e => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { if (e.target === e.currentTarget) setIsNewModalOpen(false); }}
+        >
+          <div className="modal-card">
             <div className="modal-header">
               <div className="modal-title">
                 <Box size={16} />

@@ -78,8 +78,11 @@ export const ResizeRoomModal: React.FC<ResizeRoomModalProps> = ({
   const remainingCount = affectedObjects.length - MAX_LISTED_OBJECT_NAMES;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-dialog modal-dialog-sm" onClick={e => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal-dialog modal-dialog-sm">
         <div className="modal-header">
           <div className="modal-title-group">
             <Maximize2 size={18} className="modal-icon" />

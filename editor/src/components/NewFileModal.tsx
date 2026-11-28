@@ -155,8 +155,11 @@ export const NewFileModal: React.FC<NewFileModalProps> = ({
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal-card">
         <div className="modal-header">
           <div className="modal-title">
             <FilePlus size={16} />

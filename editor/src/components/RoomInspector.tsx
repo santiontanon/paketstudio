@@ -1246,8 +1246,11 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
       {/* Room Rules & Scripts Editor Modal */}
       {isRulesModalOpen && activeRoom && (
-        <div className="modal-overlay" onClick={() => setIsRulesModalOpen(false)}>
-          <div className="modal-dialog modal-dialog-lg" onClick={e => e.stopPropagation()} style={{ width: '800px', maxWidth: '90vw' }}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { if (e.target === e.currentTarget) setIsRulesModalOpen(false); }}
+        >
+          <div className="modal-dialog modal-dialog-lg" style={{ width: '800px', maxWidth: '90vw' }}>
             <div className="modal-header">
               <div className="modal-title-group">
                 <FileText size={18} className="modal-icon text-accent" />
@@ -1314,8 +1317,11 @@ export const RoomInspector: React.FC<RoomInspectorProps> = ({
 
       {/* New Room Modal */}
       {isNewRoomModalOpen && (
-        <div className="modal-overlay" onClick={() => setIsNewRoomModalOpen(false)}>
-          <div className="modal-dialog modal-dialog-sm" onClick={e => e.stopPropagation()}>
+        <div
+          className="modal-overlay"
+          onMouseDown={e => { if (e.target === e.currentTarget) setIsNewRoomModalOpen(false); }}
+        >
+          <div className="modal-dialog modal-dialog-sm">
             <div className="modal-header">
               <div className="modal-title-group">
                 <DoorOpen size={18} className="modal-icon" />

@@ -181,10 +181,12 @@ export const PaletteManagerModal: React.FC<PaletteManagerModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div
+      className="modal-overlay"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div 
         className="modal-card palette-manager-modal" 
-        onClick={e => e.stopPropagation()}
         style={{ width: '680px', maxWidth: '95vw', maxHeight: '90vh', display: 'flex', flexDirection: 'column' }}
       >
         {/* Modal Header */}

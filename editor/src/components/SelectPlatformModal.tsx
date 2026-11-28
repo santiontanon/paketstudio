@@ -45,8 +45,11 @@ export const SelectPlatformModal: React.FC<SelectPlatformModalProps> = ({
   };
 
   return (
-    <div className="modal-overlay" onClick={onCancel}>
-      <div className="modal-dialog modal-dialog-sm" onClick={e => e.stopPropagation()}>
+    <div
+      className="modal-overlay"
+      onMouseDown={e => { if (e.target === e.currentTarget) onCancel(); }}
+    >
+      <div className="modal-dialog modal-dialog-sm">
         <div className="modal-header">
           <div className="modal-title-group">
             <Monitor size={18} className="modal-icon text-accent" />
